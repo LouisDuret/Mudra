@@ -127,6 +127,17 @@ struct PoseEpisode {
     below_since: Option<u64>,
     fired: bool,
     last_fire_us: u64,
+    /// Consommé par un geste à deux mains : ne déclenche plus rien seul.
+    paired: bool,
+}
+
+/// Même pose tenue par les deux mains, liée par un binding `hand = "both"` (EF-24).
+#[derive(Debug, Clone, Copy)]
+struct PairEpisode {
+    slot: usize,
+    start_us: u64,
+    fired: bool,
+    last_fire_us: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -202,7 +213,11 @@ impl Resolved {
             .enumerate()
             .filter_map(|(index, b)| {
                 // Le geste de réveil et le geste de verrouillage sont réservés.
-                if wake_mode && (b.gesture == a.wake_gesture || b.gesture == a.lock_gesture) {
+                // À deux mains, ils restent utilisables (deux paumes ouvertes, EF-24).
+                if wake_mode
+                    && b.hand != HandFilter::Both
+                    && (b.gesture == a.wake_gesture || b.gesture == a.lock_gesture)
+                {
                     return None;
                 }
                 if b.gesture == NONE_LABEL {
@@ -276,6 +291,13 @@ impl Resolved {
             .position(|b| b.kind == GestureKind::Static(label) && hand.matches(b.hand))
     }
 
+    /// Binding à deux mains (`hand = "both"`) d'une pose statique.
+    fn pair_binding(&self, label: usize) -> Option<usize> {
+        self.bindings
+            .iter()
+            .position(|b| b.kind == GestureKind::Static(label) && b.hand == HandFilter::Both)
+    }
+
     fn dynamic_binding(&self, label: usize, hand: Handedness) -> Option<usize> {
         self.bindings
             .iter()
@@ -325,6 +347,7 @@ pub struct Engine {
     refractory_until_us: u64,
     suppress_until_us: u64,
     continuous: Option<ActiveContinuous>,
+    pair: Option<PairEpisode>,
 }
 
 impl Engine {
@@ -341,6 +364,7 @@ impl Engine {
             refractory_until_us: 0,
             suppress_until_us: 0,
             continuous: None,
+            pair: None,
         }
     }
 
@@ -424,6 +448,7 @@ impl Engine {
         self.cfg = Resolved::new(config, static_labels, dynamic_labels);
         self.last_fire_us = vec![None; self.cfg.bindings.len()];
         self.tracks.clear();
+        self.pair = None;
         if self.state != EngineState::Paused {
             let rest = Self::rest_state(&self.cfg);
             self.transition(rest, Reason::ConfigReload, events);
@@ -518,6 +543,12 @@ impl Engine {
             }
         }
 
+        if self.state == EngineState::Armed {
+            self.update_pair(now_us, hands, events);
+        } else {
+            self.pair = None;
+        }
+
         if self.state == EngineState::Armed
             && self.cfg.mode == ActivationMode::WakeGesture
             && now_us >= self.armed_deadline_us
@@ -555,6 +586,68 @@ impl Engine {
         }
         // Le délai d'armement est relancé à chaque action (EF-30).
         self.armed_deadline_us = now_us + self.cfg.armed_duration_us;
+    }
+
+    /// Geste à deux mains : les deux mains tiennent la même pose, liée par un
+    /// binding `hand = "both"`. Maintien, cooldown et répétition comme à une main.
+    fn update_pair(&mut self, now_us: u64, hands: &[HandObs<'_>], events: &mut Vec<EngineEvent>) {
+        let common = match hands {
+            [a, b] => {
+                let pose = |h: &HandObs<'_>| {
+                    self.tracks
+                        .iter()
+                        .find(|t| t.track == h.track)
+                        .and_then(|t| t.pose)
+                        .filter(|e| e.below_since.is_none())
+                };
+                match (pose(a), pose(b)) {
+                    (Some(x), Some(y)) if x.label == y.label => {
+                        let p =
+                            |h: &HandObs<'_>| h.static_probs.get(x.label).copied().unwrap_or(0.0);
+                        self.cfg
+                            .pair_binding(x.label)
+                            .map(|slot| (slot, p(a).min(p(b)), a.handedness))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let Some((slot, confidence, hand)) = common else {
+            self.pair = None;
+            return;
+        };
+        let mut pair = match self.pair {
+            Some(p) if p.slot == slot => p,
+            _ => PairEpisode {
+                slot,
+                start_us: now_us,
+                fired: false,
+                last_fire_us: 0,
+            },
+        };
+        let (hold_us, repeat_us) = {
+            let b = &self.cfg.bindings[slot];
+            (b.hold_us, b.repeat_us)
+        };
+        if !pair.fired {
+            if now_us - pair.start_us >= hold_us && self.cooldown_ok(slot, now_us) {
+                pair.fired = true;
+                pair.last_fire_us = now_us;
+                for t in &mut self.tracks {
+                    if let Some(e) = &mut t.pose {
+                        e.paired = true;
+                    }
+                }
+                self.fire(slot, now_us, confidence, hand, false, events);
+            }
+        } else if let Some(repeat) = repeat_us
+            && now_us - pair.last_fire_us >= repeat
+        {
+            pair.last_fire_us = now_us;
+            self.fire(slot, now_us, confidence, hand, true, events);
+        }
+        self.pair = Some(pair);
     }
 
     fn update_pose(&mut self, now_us: u64, h: &HandObs<'_>, events: &mut Vec<EngineEvent>) {
@@ -597,10 +690,21 @@ impl Engine {
                 below_since: None,
                 fired: false,
                 last_fire_us: 0,
+                paired: false,
             });
         }
 
         // 2. Consommateur de la pose selon l'état.
+        // L'autre main tient la même pose et un binding à deux mains existe :
+        // il a priorité sur ce que la pose ferait à une main (EF-24).
+        let pairing = episode.is_some_and(|e| {
+            e.paired
+                || (self.cfg.pair_binding(e.label).is_some()
+                    && self
+                        .tracks
+                        .iter()
+                        .any(|t| t.track != h.track && t.pose.is_some_and(|p| p.label == e.label)))
+        });
         if let Some(e) = &mut episode {
             let held = now_us - e.start_us;
             let confidence = probs[e.label];
@@ -615,7 +719,9 @@ impl Engine {
                     }
                 }
                 EngineState::Armed => {
-                    if wake_mode && Some(e.label) == self.cfg.lock {
+                    if pairing {
+                        // Laissé à `update_pair`.
+                    } else if wake_mode && Some(e.label) == self.cfg.lock {
                         if !e.fired && held >= self.cfg.hold_us {
                             e.fired = true;
                             self.transition(EngineState::Locked, Reason::LockGesture, events);

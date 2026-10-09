@@ -58,6 +58,7 @@ Gestes livrés par défaut (Annexe B du cahier des charges) :
 | Trois doigts | afficher le bureau (Win+D) |
 | Pincement maintenu | volume continu : monter ou descendre la main |
 | Index tendu | souris : le curseur suit l'index, pincer pour cliquer |
+| Deux paumes ouvertes | vue des tâches (Win+Tab) |
 | Balayage gauche / droite, paume ouverte | piste précédente / suivante |
 | Balayage haut / bas | lecture-pause / couper le son |
 
@@ -104,6 +105,21 @@ action = { type = "launch", path = 'C:\Program Files\Mozilla Firefox\firefox.exe
 [[bindings]]
 gesture = "three_fingers"
 action = { type = "keys", combo = "Win+D" }
+```
+
+Geste à deux mains : ajoute `hand = "both"` à un binding de pose statique.
+Il part quand les deux mains tiennent la même pose pendant `hold_ms`, et il a
+priorité sur le binding à une main de cette pose. Lève les deux mains à peu
+près ensemble : si la même pose est aussi liée à une main seule, la première
+main levée peut déclencher son action avant l'arrivée de la seconde. Les
+gestes dynamiques et les contrôles continus restent à une main.
+
+```toml
+[[bindings]]
+gesture = "open_palm"
+hand = "both"
+hold_ms = 500
+action = { type = "keys", combo = "Win+Tab" }
 ```
 
 Actions disponibles : `launch`, `volume`, `media`, `keys`, `screenshot`, `snip`,
@@ -216,7 +232,7 @@ Fait et vérifié sur la machine cible (i7-10700K, RTX 3070, StreamCam) :
 - **Lissage** : `beta` recalé ([ADR 0002](docs/adr/0002-calibrage-one-euro.md)).
 - **Latéralité** : la convention du modèle ONNX est l'inverse de celle annoncée
   ([ADR 0003](docs/adr/0003-convention-lateralite.md)).
-- Non réalisés : gestes à deux mains (EF-24), défilement à deux doigts et
+- Non réalisés : défilement à deux doigts et
   rotation du poignet (EF-52), `--save-frames`, CUDA/TensorRT, audit
   d'allocations (ENF-06), échantillonnage NV12 sans conversion, comparaison
   avec libjpeg-turbo (B-02), `cargo deny` et couverture non exécutés.

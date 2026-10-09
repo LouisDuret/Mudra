@@ -283,6 +283,9 @@ pub enum HandFilter {
     Right,
     #[default]
     Any,
+    /// Les deux mains tiennent la même pose en même temps (EF-24). Réservé
+    /// aux poses statiques des bindings.
+    Both,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]

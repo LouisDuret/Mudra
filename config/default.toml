@@ -20,7 +20,7 @@ auto_exposure_priority = false    # évite la chute à 30 fps en faible lumière
 
 [inference]
 execution_provider = "cpu"        # cpu | directml — défaut fixé par B-01 (docs/adr/0001)
-max_hands = 1                     # 1 ou 2
+max_hands = 2                     # 1 ou 2
 palm_score_threshold = 0.5
 presence_threshold = 0.6
 redetect_every_n_frames = 10
@@ -101,6 +101,13 @@ action = { type = "media", key = "play_pause" }
 [[bindings]]
 gesture = "swipe_down"
 action = { type = "volume", op = "mute_toggle" }
+
+# Geste à deux mains : les deux mains tiennent la même pose (hand = "both").
+[[bindings]]
+gesture = "open_palm"
+hand = "both"
+hold_ms = 500
+action = { type = "keys", combo = "Win+Tab" }   # vue des tâches
 
 [[continuous]]
 name = "volume"

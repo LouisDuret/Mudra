@@ -308,7 +308,21 @@ pub fn validate(config: &Config, known: &KnownGestures) -> Vec<Issue> {
                 ),
             );
         }
-        if is_static && (b.gesture == a.wake_gesture || b.gesture == a.lock_gesture) {
+        let both = b.hand == HandFilter::Both;
+        if both && is_dynamic {
+            c.error(
+                format!("{field}.hand"),
+                "« both » ne s'applique qu'aux poses statiques",
+            );
+        }
+        if both && config.inference.max_hands < 2 {
+            c.warn(
+                format!("{field}.hand"),
+                "jamais déclenché tant que inference.max_hands = 1",
+            );
+        }
+        // À deux mains, le geste de réveil ou de verrouillage reste utilisable.
+        if is_static && !both && (b.gesture == a.wake_gesture || b.gesture == a.lock_gesture) {
             c.warn(
                 format!("{field}.gesture"),
                 format!(
@@ -347,6 +361,12 @@ pub fn validate(config: &Config, known: &KnownGestures) -> Vec<Issue> {
 
     for (i, k) in config.continuous.iter().enumerate() {
         let field = format!("continuous[{i}]");
+        if k.hand == HandFilter::Both {
+            c.error(
+                format!("{field}.hand"),
+                "« both » n'est pas pris en charge pour un contrôle continu",
+            );
+        }
         c.static_gesture(&format!("{field}.enter_gesture"), &k.enter_gesture);
         if config.continuous[..i]
             .iter()
@@ -411,6 +431,19 @@ mod tests {
     fn check(toml: &str) -> Vec<Issue> {
         let config = crate::parse(toml, Path::new("test.toml")).unwrap();
         validate(&config, &KnownGestures::builtin())
+    }
+
+    #[test]
+    fn both_hands_only_for_static_bindings() {
+        let pair = |gesture: &str| {
+            format!(
+                "{}\n[[bindings]]\ngesture = \"{gesture}\"\nhand = \"both\"\naction = {{ type = \"media\", key = \"next\" }}\n",
+                crate::DEFAULT_CONFIG_TOML
+            )
+        };
+        let on_hand = |toml: &str| check(toml).iter().any(|i| i.field.ends_with(".hand"));
+        assert!(!on_hand(&pair("thumbs_up")));
+        assert!(on_hand(&pair("swipe_left")));
     }
 
     fn has_error(issues: &[Issue], field: &str) -> bool {

@@ -288,3 +288,32 @@ fn builtin_classifier_recognises_real_gestures() {
         );
     }
 }
+
+#[test]
+fn second_hand_joins_an_existing_track() {
+    // Cas réel : une main est déjà suivie quand la seconde entre dans le champ.
+    let Some(mut tracker) = tracker(1, false) else {
+        return;
+    };
+    let bytes = std::fs::read(root().join("tests/fixtures/hands/woman_hands.jpg")).unwrap();
+    let mut decoder = FrameDecoder::new();
+    let image = decoder.decode(SourceFormat::Mjpeg, &bytes, 0, 0).unwrap();
+    let mut hands = Vec::new();
+    for _ in 0..3 {
+        tracker.process(&image, &mut hands).unwrap();
+    }
+    assert_eq!(hands.len(), 1);
+    let mut config = *tracker.config();
+    config.max_hands = 2;
+    tracker.set_config(config);
+    let mut counts = Vec::new();
+    for _ in 0..40 {
+        tracker.process(&image, &mut hands).unwrap();
+        counts.push(hands.len());
+    }
+    assert_eq!(
+        counts.last(),
+        Some(&2),
+        "mains suivies par trame : {counts:?}"
+    );
+}

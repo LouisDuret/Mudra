@@ -498,6 +498,95 @@ fn always_on_mode_never_locks() {
     assert_eq!(rig.engine.state(), EngineState::Armed);
 }
 
+/// Config par défaut, plus un binding à deux mains sur `gesture`.
+fn rig_with_pair(gesture: &str) -> (Rig, usize) {
+    let mut config =
+        mudra_config::parse(mudra_config::DEFAULT_CONFIG_TOML, Path::new("d")).unwrap();
+    config.bindings.retain(|b| b.hand != HandFilter::Both);
+    let mut pair = config.bindings[0].clone();
+    pair.gesture = gesture.into();
+    pair.hand = HandFilter::Both;
+    pair.hold_ms = Some(300);
+    pair.repeat_ms = None;
+    config.bindings.push(pair);
+    let index = config.bindings.len() - 1;
+    (Rig::new(config), index)
+}
+
+impl Rig {
+    /// Les deux mains tiennent la même pose pendant `ms` millisecondes.
+    fn hold_both(&mut self, label: &str, ms: u64) -> Vec<EngineEvent> {
+        let probs = Self::probs(&self.statics.clone(), label, 0.97);
+        let mut all = Vec::new();
+        for _ in 0..(ms * 1000).div_ceil(FRAME_US) {
+            let right = Self::obs(&probs, None);
+            let mut left = Self::obs(&probs, None);
+            left.track = 2;
+            left.handedness = Handedness::Left;
+            all.extend(self.step(&[right, left]));
+        }
+        all
+    }
+}
+
+fn fired_bindings(events: &[EngineEvent]) -> Vec<usize> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            EngineEvent::GestureFired { binding, .. } => Some(*binding),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn two_open_palms_fire_the_two_hand_binding_once() {
+    // La paume ouverte est le geste de réveil : seule, elle ne fait rien une fois armé.
+    let (mut rig, pair) = rig_with_pair("open_palm");
+    rig.arm();
+    assert!(rig.hold("open_palm", 0.97, 800).is_empty());
+    rig.hold("none", 1.0, 200);
+    assert!(fired_bindings(&rig.hold_both("open_palm", 200)).is_empty());
+    assert_eq!(
+        fired_bindings(&rig.hold_both("open_palm", 1200)),
+        vec![pair]
+    );
+    assert_eq!(rig.engine.state(), EngineState::Armed);
+}
+
+#[test]
+fn two_hand_binding_takes_priority_over_single_hand_binding() {
+    let (mut rig, pair) = rig_with_pair("v_sign");
+    let single = rig.binding_index("v_sign");
+    rig.arm();
+    // Les deux mains ensemble : seul le binding à deux mains part.
+    assert_eq!(fired_bindings(&rig.hold_both("v_sign", 1000)), vec![pair]);
+    // Une main se retire : l'autre, déjà consommée, ne déclenche rien.
+    assert!(rig.hold("v_sign", 0.97, 1000).is_empty());
+    // Une main seule, plus tard : le binding à une main fonctionne toujours.
+    rig.hold("none", 1.0, 300);
+    assert_eq!(
+        fired_bindings(&rig.hold("v_sign", 0.97, 1000)),
+        vec![single]
+    );
+}
+
+#[test]
+fn two_hands_with_different_poses_do_not_pair() {
+    let (mut rig, pair) = rig_with_pair("open_palm");
+    rig.arm();
+    let palm = Rig::probs(&rig.statics.clone(), "open_palm", 0.97);
+    let none = Rig::probs(&rig.statics.clone(), "none", 1.0);
+    for _ in 0..90 {
+        let right = Rig::obs(&palm, None);
+        let mut left = Rig::obs(&none, None);
+        left.track = 2;
+        left.handedness = Handedness::Left;
+        let events = rig.step(&[right, left]);
+        assert!(!fired_bindings(&events).contains(&pair));
+    }
+}
+
 #[test]
 fn hand_filter_is_respected() {
     let mut config =

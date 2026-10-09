@@ -205,7 +205,7 @@ mod tests {
         assert_eq!(config.camera.width, 1280);
         assert_eq!(config.camera.fps, 60);
         assert_eq!(config.activation.wake_gesture, "open_palm");
-        assert_eq!(config.bindings.len(), 9);
+        assert_eq!(config.bindings.len(), 10);
         assert_eq!(config.continuous.len(), 2);
         let issues = validate(&config, &KnownGestures::builtin());
         assert!(issues.iter().all(|i| i.level != Level::Error), "{issues:?}");
