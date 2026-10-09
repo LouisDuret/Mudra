@@ -1,0 +1,16 @@
+Mudra — modèles de vision tiers
+===============================
+
+Les fichiers suivants proviennent du dépôt opencv_zoo
+(https://github.com/opencv/opencv_zoo) et sont distribués sous licence
+Apache 2.0 (voir LICENSE dans ce dossier) :
+
+  - palm_detection_mediapipe_2023feb.onnx
+      models/palm_detection_mediapipe — détection de paume BlazePalm, 192×192
+  - handpose_estimation_mediapipe_2023feb.onnx
+      models/handpose_estimation_mediapipe — 21 points-clés de la main, 224×224
+
+Ces modèles sont des conversions ONNX des modèles MediaPipe Hands de Google
+(https://github.com/google/mediapipe, Apache 2.0). Ils ne sont pas modifiés.
+Ils sont téléchargés par scripts/fetch-models.ps1 et vérifiés contre
+SHA256SUMS ; ils ne sont pas versionnés dans ce dépôt.

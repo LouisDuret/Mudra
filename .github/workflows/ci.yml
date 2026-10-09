@@ -1,0 +1,54 @@
+# Intégration continue (§10.3) : format, lint, tests sans caméra, licences ;
+# côté Python : ruff, pytest et export ONNX sur un dataset synthétique.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Modèles de vision
+        run: powershell -ExecutionPolicy Bypass -File scripts\fetch-models.ps1
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # Sans caméra : les tests matériels sont marqués #[ignore].
+      - run: cargo test --workspace
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  python:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: training
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+      - run: uv run ruff check .
+      - run: uv run pytest
+
+  # Les vecteurs dorés produits par Python doivent être reproduits par Rust.
+  golden:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v5
+      - name: Entraînement sur un dataset synthétique
+        working-directory: training
+        run: |
+          uv run mudra-train synth --dataset ../target/synth/dataset
+          uv run mudra-train all --dataset ../target/synth/dataset --models ../target/synth/models --golden ../target/synth/golden --reports ../target/synth/reports --epochs 30
+      - name: Vecteurs dorés côté Rust
+        run: cargo test -p mudra-gestures --test golden
+        env:
+          MUDRA_GOLDEN_DIR: ${{ github.workspace }}\target\synth\golden

@@ -1,0 +1,124 @@
+# %APPDATA%\Mudra\config.toml — rechargé à chaud (D-15)
+# Référence : docs/cahier-des-charges.md, Annexe C.
+
+[general]
+log_level = "info"                # trace | debug | info | warn | error
+allow_commands = false            # active l'action "command" (ENF-22)
+sounds = true                     # retours sonores (sons système, EF-36)
+overlay = true                    # petit overlay d'état au premier plan (EF-37)
+autostart = false                 # lancement à l'ouverture de session (EF-74)
+
+[camera]
+device = "Logitech StreamCam"     # sous-chaîne du nom, ou index (0, 1…)
+format = "mjpeg"                  # mjpeg | nv12 | yuy2
+width = 1280
+height = 720
+fps = 60
+mirror = true                     # vue « selfie »
+exposure = "auto"                 # "auto" ou valeur manuelle (ex. -6)
+auto_exposure_priority = false    # évite la chute à 30 fps en faible lumière
+
+[inference]
+execution_provider = "cpu"        # cpu | directml — défaut fixé par B-01 (docs/adr/0001)
+max_hands = 1                     # 1 ou 2
+palm_score_threshold = 0.5
+presence_threshold = 0.6
+redetect_every_n_frames = 10
+idle_detection_hz = 10
+
+[models]
+palm = "models/palm_detection_mediapipe_2023feb.onnx"
+landmarks = "models/handpose_estimation_mediapipe_2023feb.onnx"
+# Classifieurs entraînés sur tes données (uv run mudra-train all). Tant que le
+# fichier n'existe pas, Mudra utilise ses classifieurs géométriques intégrés.
+static = "models/static_gestures.onnx"
+dynamic = "models/dynamic_gestures.onnx"
+
+[smoothing]                       # filtre One Euro, en unités de taille de paume
+min_cutoff = 1.0                  # Hz au repos : plus bas = plus stable
+beta = 1.5                        # réactivité en mouvement (calibré : docs/adr/0002)
+d_cutoff = 1.0
+
+[activation]
+mode = "wake_gesture"             # wake_gesture | always_on
+wake_gesture = "open_palm"
+wake_hold_ms = 600
+lock_gesture = "fist"
+armed_duration_ms = 4000
+pause_hotkey = "Ctrl+Alt+G"
+
+[defaults]
+static_enter = 0.85
+static_exit = 0.60
+hold_ms = 300
+cooldown_ms = 800
+dynamic_threshold = 0.80
+dynamic_refractory_ms = 600
+
+[[bindings]]
+gesture = "thumbs_up"
+hand = "any"                      # left | right | any
+repeat_ms = 250
+action = { type = "volume", op = "step", delta = 0.05, mode = "api" }
+
+[[bindings]]
+gesture = "thumbs_down"
+repeat_ms = 250
+action = { type = "volume", op = "step", delta = -0.05, mode = "api" }
+
+[[bindings]]
+gesture = "v_sign"
+[bindings.action]
+type = "screenshot"
+target = "active_monitor"         # screen | active_monitor | active_window
+dir = "~/Pictures/Mudra"
+clipboard = true
+
+[[bindings]]
+gesture = "rock"
+hold_ms = 500
+[bindings.action]
+type = "launch"
+path = "notepad.exe"              # programme, document ou URL de ton choix
+args = []
+
+[[bindings]]
+gesture = "three_fingers"
+action = { type = "keys", combo = "Win+D" }
+
+[[bindings]]
+gesture = "swipe_left"
+action = { type = "media", key = "prev" }
+
+[[bindings]]
+gesture = "swipe_right"
+action = { type = "media", key = "next" }
+
+[[bindings]]
+gesture = "swipe_up"
+action = { type = "media", key = "play_pause" }
+
+[[bindings]]
+gesture = "swipe_down"
+action = { type = "volume", op = "mute_toggle" }
+
+[[continuous]]
+name = "volume"
+enter_gesture = "pinch"
+enter_hold_ms = 250
+[continuous.control]
+type = "volume"
+source = "vertical_displacement"
+gain = 1.5
+dead_zone = 0.02
+
+[[continuous]]
+name = "mouse"
+enter_gesture = "pointing"
+enter_hold_ms = 300
+[continuous.control]
+type = "mouse"
+active_zone = [0.2, 0.2, 0.8, 0.8]  # x0, y0, x1, y1 normalisés
+click = "pinch"
+min_cutoff = 0.8                  # profil One Euro dédié à la souris
+beta = 1.0

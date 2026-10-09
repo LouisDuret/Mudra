@@ -1,0 +1,58 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.88"
+
+[workspace.dependencies]
+mudra-capture = { path = "crates/mudra-capture" }
+mudra-vision = { path = "crates/mudra-vision" }
+mudra-gestures = { path = "crates/mudra-gestures" }
+mudra-actions = { path = "crates/mudra-actions" }
+mudra-config = { path = "crates/mudra-config" }
+mudra-dataset = { path = "crates/mudra-dataset" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+crossbeam-channel = "0.5"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+tracing-appender = "0.2"
+hdrhistogram = { version = "7", default-features = false }
+ort = { version = "=2.0.0-rc.13", features = ["directml"] }
+zune-jpeg = "0.5"
+clap = { version = "4", features = ["derive"] }
+notify = "8"
+png = "0.18"
+xcap = "0.9"
+winit = "0.30"
+tray-icon = "0.26"
+global-hotkey = "0.8"
+egui = "0.36"
+egui-winit = { version = "0.36", default-features = false }
+egui-wgpu = { version = "0.36", default-features = false, features = ["winit"] }
+wgpu = "30"
+pollster = "1"
+proptest = "1"
+
+# D-20 : binaire destiné à cette machine uniquement.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+debug = "line-tables-only"
+
+# Boucle de développement : dépendances optimisées (inférence, décodage JPEG),
+# code du projet compilé vite.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

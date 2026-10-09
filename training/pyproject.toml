@@ -1,0 +1,46 @@
+[project]
+name = "mudra-train"
+version = "0.1.0"
+description = "Entraînement et export ONNX des classifieurs de gestes de Mudra (hors ligne)"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "onnx>=1.16",
+    "onnxruntime>=1.18",
+    "scikit-learn>=1.4",
+    "torch>=2.4",
+]
+
+[project.scripts]
+mudra-train = "mudra_train.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mudra_train"]
+
+# PyTorch CPU par défaut : les réseaux font quelques dizaines de milliers de
+# paramètres, l'entraînement prend moins de deux minutes sans GPU. Pour CUDA,
+# remplace l'index par https://download.pytorch.org/whl/cu124.
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
