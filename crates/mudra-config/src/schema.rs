@@ -288,10 +288,21 @@ pub enum HandFilter {
     Both,
 }
 
+fn enabled_by_default() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Binding {
     pub gesture: String,
+    /// Faux : le binding est conservé mais ne déclenche rien.
+    #[serde(default = "enabled_by_default", skip_serializing_if = "is_true")]
+    pub enabled: bool,
     #[serde(default)]
     pub hand: HandFilter,
     #[serde(default, skip_serializing_if = "Option::is_none")]

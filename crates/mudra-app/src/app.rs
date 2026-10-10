@@ -32,8 +32,9 @@ use crate::pipeline::{
     RecordRequest, Source, Status,
 };
 use crate::platform;
+use crate::ui::gestures::GesturesState;
 use crate::ui::overlay::{self, OverlayModel};
-use crate::ui::preview::{self, LogEntry, LogKind, PreviewModel, RecordForm, UiAction};
+use crate::ui::preview::{self, LogEntry, LogKind, PreviewModel, RecordForm, Tab, UiAction};
 use crate::ui::{EguiWindow, TrayKind, theme, tray_icon_rgba};
 
 /// Délai avant de détruire la fenêtre d'overlay masquée : évite de la recréer
@@ -196,6 +197,12 @@ struct App {
     overlay_destroy_at: Option<Instant>,
     log: VecDeque<LogEntry>,
     record: RecordForm,
+    /// Gestes des classifieurs chargés, pour l'onglet « Gestes ».
+    known: mudra_config::KnownGestures,
+    tab: Tab,
+    gestures: GesturesState,
+    /// Contenu du fichier avant la dernière modification faite dans l'interface.
+    undo_text: Option<String>,
     reload_at: Option<Instant>,
     restart_at: Option<Instant>,
     initialized: bool,
@@ -276,6 +283,7 @@ pub fn run(config_path: PathBuf, explicit: bool, options: RunOptions) -> Result<
             }
         })?;
 
+    let (known, _) = crate::cli::known_gestures(&config);
     let mut app = App {
         proxy,
         config_path,
@@ -300,6 +308,10 @@ pub fn run(config_path: PathBuf, explicit: bool, options: RunOptions) -> Result<
         overlay_destroy_at: None,
         log: VecDeque::with_capacity(128),
         record: RecordForm::default(),
+        known,
+        tab: Tab::default(),
+        gestures: GesturesState::default(),
+        undo_text: None,
         reload_at: None,
         restart_at: None,
         initialized: false,
@@ -455,6 +467,9 @@ impl App {
         match result {
             Ok(pipeline) => {
                 pipeline.send(Command::SetPreview(self.preview.is_some()));
+                if self.gestures.dry_run {
+                    pipeline.send(Command::SetDryRun(true));
+                }
                 self.status = pipeline.status();
                 self.pipeline = Some(pipeline);
                 self.pipeline_error = None;
@@ -654,6 +669,9 @@ impl App {
             texture: preview.texture.as_ref(),
             pipeline_error: self.pipeline_error.as_deref(),
             record: &mut self.record,
+            known: &self.known,
+            tab: &mut self.tab,
+            gestures: &mut self.gestures,
         };
         let mut actions = Vec::new();
         preview
@@ -678,8 +696,82 @@ impl App {
             .paint(theme::PANEL, |ui| overlay::draw(ui, &model));
     }
 
+    /// Applique une modification de binding faite dans l'onglet « Gestes » :
+    /// écrit le fichier, puis recharge la configuration.
+    fn edit_binding(&mut self, edit: mudra_config::edit::BindingEdit) {
+        match self.write_binding_edit(&edit) {
+            Ok(previous) => {
+                self.undo_text = Some(previous);
+                self.gestures.can_undo = true;
+                self.gestures.error = None;
+                self.gestures.editor = None;
+                self.reload_config(false);
+            }
+            Err(e) => self.gestures.error = Some(e),
+        }
+    }
+
+    /// Renvoie le contenu du fichier avant la modification.
+    fn write_binding_edit(&self, edit: &mudra_config::edit::BindingEdit) -> Result<String, String> {
+        let path = &self.config_path;
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("lecture de {} : {e}", path.display()))?;
+        // Les indices de l'interface sont ceux de la configuration chargée.
+        let on_disk = mudra_config::parse(&text, path).map_err(|e| e.to_string())?;
+        if on_disk.bindings != self.config.bindings {
+            return Err("Le fichier de configuration a changé entre-temps : réessaie.".into());
+        }
+        let updated = mudra_config::edit::apply_binding_edit(&text, edit)?;
+        let config = mudra_config::parse(&updated, path).map_err(|e| e.to_string())?;
+        let errors: Vec<String> = mudra_config::validate(&config, &self.known)
+            .iter()
+            .filter(|i| i.level == Level::Error)
+            .map(|i| i.to_string())
+            .collect();
+        if !errors.is_empty() {
+            return Err(errors.join(" ; "));
+        }
+        mudra_config::edit::write_atomic(path, &updated)
+            .map_err(|e| format!("écriture de {} : {e}", path.display()))?;
+        Ok(text)
+    }
+
+    fn undo_edit(&mut self) {
+        let Some(text) = self.undo_text.take() else {
+            return;
+        };
+        self.gestures.can_undo = false;
+        match mudra_config::edit::write_atomic(&self.config_path, &text) {
+            Ok(()) => {
+                self.gestures.error = None;
+                self.reload_config(false);
+            }
+            Err(e) => self.gestures.error = Some(format!("annulation impossible : {e}")),
+        }
+    }
+
     fn ui_action(&mut self, action: UiAction) {
         match action {
+            UiAction::EditBinding(edit) => self.edit_binding(edit),
+            UiAction::UndoEdit => self.undo_edit(),
+            UiAction::TestAction(action) => match &self.pipeline {
+                Some(pipeline) => pipeline.send(Command::TestAction(action)),
+                None => self.notice("Mudra n'est pas démarré : action non testée", true),
+            },
+            UiAction::SetDryRun(on) => {
+                if let Some(pipeline) = &self.pipeline {
+                    pipeline.send(Command::SetDryRun(on));
+                }
+                self.log(
+                    LogKind::Info,
+                    if on {
+                        "Mode essai : les gestes n'exécutent plus rien"
+                    } else {
+                        "Mode essai terminé"
+                    }
+                    .to_string(),
+                );
+            }
             UiAction::TogglePause => self.toggle_pause(),
             UiAction::Lock => {
                 if let Some(pipeline) = &self.pipeline {
@@ -756,6 +848,11 @@ impl App {
             return;
         }
         let old = std::mem::replace(&mut self.config, Arc::new(config));
+        self.known = crate::cli::known_gestures(&self.config).0;
+        if old.bindings != self.config.bindings {
+            // Les indices du formulaire ouvert ne correspondent plus.
+            self.gestures.editor = None;
+        }
         for warning in warnings {
             self.log(LogKind::Info, warning);
         }
@@ -842,6 +939,7 @@ impl App {
                 }
             }
             PipelineEvent::Gesture {
+                binding,
                 gesture,
                 action,
                 confidence,
@@ -849,6 +947,7 @@ impl App {
                 repeat,
                 latency_ms,
             } => {
+                self.gestures.flash = Some((binding, Instant::now()));
                 let name = theme::gesture_name(&gesture).to_string();
                 if !repeat {
                     let side = if right { "main droite" } else { "main gauche" };

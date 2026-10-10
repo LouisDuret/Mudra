@@ -76,6 +76,10 @@ pub enum Command {
     Record(RecordRequest),
     CancelRecording,
     ResetMetrics,
+    /// Mode essai : les gestes sont reconnus et affichés, rien n'est exécuté.
+    SetDryRun(bool),
+    /// Exécute une action une fois, sans geste (bouton « Tester »).
+    TestAction(Action),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -108,6 +112,8 @@ pub enum PipelineEvent {
         reason: Reason,
     },
     Gesture {
+        /// Indice du binding dans `Config::bindings`.
+        binding: usize,
         gesture: String,
         action: String,
         confidence: f32,
@@ -427,6 +433,7 @@ struct Worker {
     recorder: Option<Recorder>,
 
     paused: bool,
+    dry_run: bool,
     preview: bool,
     clock_us: u64,
     last_idle_detection_us: u64,
@@ -460,6 +467,7 @@ impl Worker {
         let now = Instant::now();
         Self {
             paused: options.start_paused,
+            dry_run: false,
             config: options.config,
             source: options.source,
             actions: options.actions,
@@ -638,6 +646,8 @@ impl Worker {
             }
             Command::Record(request) => self.start_recording(request),
             Command::CancelRecording => self.cancel_recording("annulé"),
+            Command::SetDryRun(on) => self.dry_run = on,
+            Command::TestAction(action) => self.run_action(action, "essai"),
             Command::ResetMetrics => {
                 self.metrics.reset_all();
                 self.frames_tracking = 0;
@@ -827,13 +837,20 @@ impl Worker {
                         action = %summary,
                         latence_ms = latency_ms,
                         repetition = repeat,
+                        essai = self.dry_run,
                         "geste déclenché"
                     );
-                    self.run_action(action, gesture);
+                    let summary = if self.dry_run {
+                        format!("{summary} (essai, non exécutée)")
+                    } else {
+                        self.run_action(action, gesture);
+                        summary
+                    };
                     if self.config.general.sounds && !repeat {
                         play_sound(Sound::Fired);
                     }
                     self.emit(PipelineEvent::Gesture {
+                        binding: *binding,
                         gesture: gesture.clone(),
                         action: summary,
                         confidence: *confidence,
@@ -847,6 +864,7 @@ impl Worker {
                         continue;
                     };
                     if matches!(c.control, Control::Volume { .. })
+                        && !self.dry_run
                         && let Some(actions) = &self.actions
                     {
                         actions.submit(ActionRequest::VolumeBegin);
@@ -862,6 +880,9 @@ impl Worker {
                     else {
                         continue;
                     };
+                    if self.dry_run {
+                        continue;
+                    }
                     let target = match &c.control {
                         Control::Mouse { target, .. } => *target,
                         Control::Volume { .. } => MouseTarget::Primary,

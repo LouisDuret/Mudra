@@ -107,6 +107,15 @@ gesture = "three_fingers"
 action = { type = "keys", combo = "Win+D" }
 ```
 
+Le plus simple est l'onglet **Gestes** de la fenêtre : il liste tous les
+gestes connus, montre celui que tu fais en ce moment, et permet d'associer,
+modifier, désactiver, tester ou supprimer une action. Chaque modification est
+écrite tout de suite dans `config.toml` (commentaires conservés) et appliquée
+sans redémarrer ; « Annuler la dernière modification » restaure le fichier
+précédent. Le « Mode essai » reconnaît les gestes sans exécuter les actions.
+Les contrôles continus, les séquences et les commandes se règlent encore dans
+le fichier.
+
 Geste à deux mains : ajoute `hand = "both"` à un binding de pose statique.
 Il part quand les deux mains tiennent la même pose pendant `hold_ms`, et il a
 priorité sur le binding à une main de cette pose. Lève les deux mains à peu

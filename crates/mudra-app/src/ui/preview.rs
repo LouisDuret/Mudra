@@ -10,9 +10,11 @@ use egui::{
     Stroke, Ui, Vec2,
 };
 use mudra_capture::CaptureState;
-use mudra_config::{Config, Control};
+use mudra_config::edit::BindingEdit;
+use mudra_config::{Action, Config, Control, KnownGestures};
 use mudra_gestures::EngineState;
 
+use super::gestures::GesturesState;
 use super::theme::{self, ACCENT, AMBER, BACKGROUND, BORDER, CARD, GREEN, MUTED, PANEL, RED, TEXT};
 use crate::pipeline::{HandStatus, PreviewFrame, Status};
 
@@ -59,8 +61,21 @@ impl Default for RecordForm {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Onglet affiché dans la fenêtre.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tab {
+    #[default]
+    Preview,
+    Gestures,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum UiAction {
+    /// Onglet « Gestes » : modification d'un binding, écrite dans le fichier.
+    EditBinding(BindingEdit),
+    UndoEdit,
+    TestAction(Action),
+    SetDryRun(bool),
     TogglePause,
     Lock,
     StartRecording,
@@ -78,6 +93,9 @@ pub struct PreviewModel<'a> {
     pub texture: Option<&'a egui::TextureHandle>,
     pub pipeline_error: Option<&'a str>,
     pub record: &'a mut RecordForm,
+    pub known: &'a KnownGestures,
+    pub tab: &'a mut Tab,
+    pub gestures: &'a mut GesturesState,
 }
 
 /// Liaisons entre points-clés (squelette de la main, Annexe A).
@@ -185,11 +203,17 @@ fn key_value(ui: &mut Ui, key: &str, value: impl Into<egui::WidgetText>) {
     });
 }
 
-fn top_bar(ui: &mut Ui, model: &PreviewModel<'_>, actions: &mut Vec<UiAction>) {
+fn top_bar(ui: &mut Ui, model: &PreviewModel<'_>, tab: &mut Tab, actions: &mut Vec<UiAction>) {
     let status = model.status;
     ui.horizontal(|ui| {
         ui.label(RichText::new("Mudra").heading().strong());
         ui.add_space(6.0);
+        ui.selectable_value(tab, Tab::Preview, "Aperçu");
+        ui.selectable_value(tab, Tab::Gestures, "Gestes");
+        ui.add_space(6.0);
+        if model.gestures.dry_run {
+            pill(ui, "mode essai", AMBER);
+        }
         if model.pipeline_error.is_some() {
             pill(ui, "Erreur", RED);
         } else {
@@ -680,6 +704,7 @@ fn camera_view(ui: &mut Ui, model: &PreviewModel<'_>) {
 /// Dessine toute la fenêtre d'aperçu et renvoie les actions demandées.
 pub fn draw(ui: &mut Ui, model: &mut PreviewModel<'_>) -> Vec<UiAction> {
     let mut actions = Vec::new();
+    let mut tab = *model.tab;
 
     egui::Panel::top("barre")
         .frame(
@@ -687,7 +712,19 @@ pub fn draw(ui: &mut Ui, model: &mut PreviewModel<'_>) -> Vec<UiAction> {
                 .fill(PANEL)
                 .inner_margin(Margin::symmetric(14, 9)),
         )
-        .show(ui, |ui| top_bar(ui, model, &mut actions));
+        .show(ui, |ui| top_bar(ui, model, &mut tab, &mut actions));
+    *model.tab = tab;
+
+    if tab == Tab::Gestures {
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(PANEL)
+                    .inner_margin(Margin::symmetric(14, 6)),
+            )
+            .show(ui, |ui| super::gestures::draw(ui, model, &mut actions));
+        return actions;
+    }
 
     egui::Panel::right("diagnostic")
         .exact_size(340.0)

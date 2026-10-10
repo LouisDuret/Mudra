@@ -2,6 +2,7 @@
 //! à la demande dans l'unique boucle d'événements winit (D-14), icônes de la
 //! zone de notification.
 
+pub mod gestures;
 pub mod overlay;
 pub mod preview;
 pub mod theme;

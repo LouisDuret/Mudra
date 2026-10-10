@@ -15,6 +15,8 @@ pub use schema::*;
 pub use validate::{Issue, KnownGestures, Level, validate};
 
 /// Contenu de `config/default.toml`, embarqué dans le binaire.
+pub mod edit;
+
 pub const DEFAULT_CONFIG_TOML: &str = include_str!("../../../config/default.toml");
 
 pub const APP_NAME: &str = "Mudra";

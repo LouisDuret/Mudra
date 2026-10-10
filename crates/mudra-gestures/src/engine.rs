@@ -220,7 +220,7 @@ impl Resolved {
                 {
                     return None;
                 }
-                if b.gesture == NONE_LABEL {
+                if b.gesture == NONE_LABEL || !b.enabled {
                     return None;
                 }
                 let kind = find(static_labels, &b.gesture)
