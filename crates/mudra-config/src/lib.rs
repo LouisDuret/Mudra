@@ -246,6 +246,17 @@ mod tests {
         .unwrap();
         assert_eq!(c.camera.device, DeviceSelector::Name("Cam".into()));
         assert_eq!(c.camera.exposure, Exposure::Manual(-6));
+        // Sans réglage, ou avec "auto" : la première caméra du PC.
+        for text in [
+            "",
+            "[camera]\ndevice = \"auto\"\n",
+            "[camera]\ndevice = \"Auto\"\n",
+        ] {
+            let c = parse(text, Path::new("c.toml")).unwrap();
+            assert_eq!(c.camera.device, DeviceSelector::Auto, "{text:?}");
+        }
+        let default = parse(DEFAULT_CONFIG_TOML, Path::new("default.toml")).unwrap();
+        assert_eq!(default.camera.device, DeviceSelector::Auto);
     }
 
     #[test]

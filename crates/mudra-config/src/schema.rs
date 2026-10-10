@@ -39,12 +39,39 @@ impl Default for General {
     }
 }
 
-/// Caméra désignée par sous-chaîne du nom ou par index.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-#[serde(untagged)]
+/// Caméra : `"auto"` (la première du PC qui s'ouvre), une sous-chaîne de
+/// son nom, ou son index.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceSelector {
+    Auto,
     Index(u32),
     Name(String),
+}
+
+impl<'de> Deserialize<'de> for DeviceSelector {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Index(u32),
+            Text(String),
+        }
+        Ok(match Raw::deserialize(d)? {
+            Raw::Index(i) => DeviceSelector::Index(i),
+            Raw::Text(s) if s.trim().eq_ignore_ascii_case("auto") => DeviceSelector::Auto,
+            Raw::Text(s) => DeviceSelector::Name(s),
+        })
+    }
+}
+
+impl Serialize for DeviceSelector {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            DeviceSelector::Auto => s.serialize_str("auto"),
+            DeviceSelector::Index(i) => s.serialize_u32(*i),
+            DeviceSelector::Name(name) => s.serialize_str(name),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -105,7 +132,7 @@ pub struct Camera {
 impl Default for Camera {
     fn default() -> Self {
         Self {
-            device: DeviceSelector::Index(0),
+            device: DeviceSelector::Auto,
             format: PixelFormat::Mjpeg,
             width: 1280,
             height: 720,

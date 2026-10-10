@@ -1,12 +1,12 @@
-//! Modification ciblée du fichier TOML, pour l'onglet « Gestes » de
-//! l'interface : bindings, activation, contrôles continus. Le reste du fichier
-//! (commentaires, ordre, mise en forme) est conservé tel quel.
+//! Modification ciblée du fichier TOML, pour l'interface : bindings,
+//! activation, contrôles continus, caméra. Le reste du fichier (commentaires,
+//! ordre, mise en forme) est conservé tel quel.
 
 use std::path::Path;
 
 use toml_edit::{DocumentMut, Item, Table, Value};
 
-use crate::schema::{ActivationMode, Binding};
+use crate::schema::{ActivationMode, Binding, DeviceSelector};
 
 /// Une modification de la liste `[[bindings]]`. Les indices sont ceux de
 /// `Config::bindings`.
@@ -40,6 +40,8 @@ pub enum ConfigEdit {
     Activation(ActivationEdit),
     /// L'indice est celui de `Config::continuous`.
     Continuous(usize, ContinuousEdit),
+    /// Caméra à utiliser (`camera.device`).
+    Camera(DeviceSelector),
 }
 
 /// Remplace une valeur en gardant le commentaire qui la suit sur sa ligne.
@@ -54,6 +56,22 @@ fn set(table: &mut Table, key: &str, new: impl Into<Value>) {
             table.insert(key, Item::Value(new));
         }
     }
+}
+
+fn apply_camera_edit(doc: &mut DocumentMut, device: &DeviceSelector) -> Result<(), String> {
+    if doc.get("camera").is_none() {
+        doc.insert("camera", Item::Table(Table::new()));
+    }
+    let table = doc
+        .get_mut("camera")
+        .and_then(Item::as_table_mut)
+        .ok_or("la caméra doit être écrite sous la forme [camera]")?;
+    match device {
+        DeviceSelector::Auto => set(table, "device", "auto"),
+        DeviceSelector::Index(i) => set(table, "device", i64::from(*i)),
+        DeviceSelector::Name(name) => set(table, "device", name.as_str()),
+    }
+    Ok(())
 }
 
 fn apply_activation_edit(doc: &mut DocumentMut, edit: &ActivationEdit) -> Result<(), String> {
@@ -110,6 +128,11 @@ pub fn apply_edit(text: &str, edit: &ConfigEdit) -> Result<String, String> {
         ConfigEdit::Continuous(index, edit) => {
             let mut doc: DocumentMut = text.parse().map_err(|e| format!("{e}"))?;
             apply_continuous_edit(&mut doc, *index, edit)?;
+            Ok(doc.to_string())
+        }
+        ConfigEdit::Camera(device) => {
+            let mut doc: DocumentMut = text.parse().map_err(|e| format!("{e}"))?;
+            apply_camera_edit(&mut doc, device)?;
             Ok(doc.to_string())
         }
     }
@@ -258,6 +281,27 @@ mod tests {
         assert_eq!(config(&on), before);
 
         assert!(apply_binding_edit(DEFAULT_CONFIG_TOML, &BindingEdit::Remove(99)).is_err());
+    }
+
+    #[test]
+    fn camera_edit_writes_a_name_an_index_or_auto() {
+        let before = config(DEFAULT_CONFIG_TOML);
+        let mut text = DEFAULT_CONFIG_TOML.to_string();
+        for device in [
+            DeviceSelector::Name("HD Webcam \"Pro\"".into()),
+            DeviceSelector::Index(1),
+            DeviceSelector::Auto,
+        ] {
+            text = apply_edit(&text, &ConfigEdit::Camera(device.clone())).unwrap();
+            let after = config(&text);
+            assert_eq!(after.camera.device, device);
+            assert_eq!(after.camera.fps, before.camera.fps);
+            assert_eq!(after.bindings, before.bindings);
+            assert_eq!(comments(&text), comments(DEFAULT_CONFIG_TOML));
+        }
+        // Un fichier sans table [camera] en reçoit une.
+        let text = apply_edit("", &ConfigEdit::Camera(DeviceSelector::Index(2))).unwrap();
+        assert_eq!(config(&text).camera.device, DeviceSelector::Index(2));
     }
 
     #[test]

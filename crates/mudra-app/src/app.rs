@@ -182,6 +182,9 @@ struct App {
     actions: ActionSender,
     pipeline: Option<Pipeline>,
     pipeline_error: Option<String>,
+    /// Caméras du PC et moment de leur dernier relevé, pour le sélecteur.
+    cameras: Vec<String>,
+    cameras_at: Option<Instant>,
     status: Status,
     tray: Option<Tray>,
     hotkeys: Option<GlobalHotKeyManager>,
@@ -301,6 +304,8 @@ pub fn run(config_path: PathBuf, explicit: bool, options: RunOptions) -> Result<
         actions,
         pipeline: None,
         pipeline_error: None,
+        cameras: Vec::new(),
+        cameras_at: None,
         status: Status::default(),
         tray: None,
         hotkeys: None,
@@ -645,6 +650,7 @@ impl App {
                 if let Some(pipeline) = &self.pipeline {
                     pipeline.send(Command::SetPreview(true));
                 }
+                self.refresh_cameras();
             }
             Err(e) => self.notice(format!("Aperçu indisponible : {e:#}"), true),
         }
@@ -695,6 +701,7 @@ impl App {
             frame: preview.frame.as_ref(),
             texture: preview.texture.as_ref(),
             pipeline_error: self.pipeline_error.as_deref(),
+            cameras: (self.options.source == Source::Camera).then_some(self.cameras.as_slice()),
             record: &mut self.record,
             known: &self.known,
             custom: &self.custom,
@@ -868,6 +875,38 @@ impl App {
         }
     }
 
+    /// Relève les caméras du PC, au plus toutes les deux secondes : le
+    /// sélecteur le demande à chaque image tant qu'il est ouvert.
+    fn refresh_cameras(&mut self) {
+        if self
+            .cameras_at
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(2))
+        {
+            return;
+        }
+        self.cameras_at = Some(Instant::now());
+        // Sur un thread à part : celui de l'interface a déjà son modèle COM.
+        let names = std::thread::spawn(mudra_capture::list_device_names).join();
+        match names {
+            Ok(Ok(names)) => self.cameras = names,
+            Ok(Err(e)) => tracing::warn!(erreur = %e, "liste des caméras indisponible"),
+            Err(_) => tracing::warn!("liste des caméras : thread interrompu"),
+        }
+    }
+
+    /// Écrit la caméra choisie dans la configuration : le pipeline redémarre
+    /// sur elle au rechargement.
+    fn select_camera(&mut self, device: mudra_config::DeviceSelector) {
+        match self.write_edit(&ConfigEdit::Camera(device)) {
+            Ok(previous) => {
+                self.undo_text = Some(previous);
+                self.gestures.can_undo = true;
+                self.reload_config(false);
+            }
+            Err(e) => self.notice(e, true),
+        }
+    }
+
     fn edit_binding(&mut self, edit: mudra_config::edit::BindingEdit) {
         self.edit_config(ConfigEdit::Binding(edit));
     }
@@ -979,6 +1018,8 @@ impl App {
                 }
             }
             UiAction::ReloadConfig => self.reload_config(true),
+            UiAction::RefreshCameras => self.refresh_cameras(),
+            UiAction::SelectCamera(device) => self.select_camera(device),
             UiAction::OpenConfigFolder => {
                 if let Some(dir) = self.config_path.parent() {
                     platform::open_path(dir);

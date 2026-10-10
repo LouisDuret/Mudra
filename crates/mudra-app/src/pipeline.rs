@@ -351,6 +351,7 @@ pub fn capture_config(config: &Config) -> CaptureConfig {
     use mudra_config::{DeviceSelector, Exposure, PixelFormat};
     CaptureConfig {
         device: match &config.camera.device {
+            DeviceSelector::Auto => mudra_capture::DeviceSelector::Auto,
             DeviceSelector::Index(i) => mudra_capture::DeviceSelector::Index(*i),
             DeviceSelector::Name(n) => mudra_capture::DeviceSelector::Name(n.clone()),
         },
@@ -1246,6 +1247,12 @@ impl Worker {
                             message: format!("Caméra « {} » connectée", status.device),
                         });
                     }
+                    if let Some(message) = status.notice.clone() {
+                        self.emit(PipelineEvent::Notice {
+                            error: false,
+                            message,
+                        });
+                    }
                 }
                 _ => {}
             }
@@ -1257,8 +1264,8 @@ impl Worker {
                 self.emit(PipelineEvent::Notice {
                     error: false,
                     message: format!(
-                        "La caméra ne tient que {:.0} fps au lieu de {} (faible lumière ?)",
-                        status.measured_fps, self.config.camera.fps
+                        "La caméra ne tient que {:.0} fps au lieu de {:.0} (faible lumière ?)",
+                        status.measured_fps, status.target_fps
                     ),
                 });
             }

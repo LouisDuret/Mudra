@@ -5,3 +5,4 @@
 /training/reports
 __pycache__/
 *.pyc
+/dist

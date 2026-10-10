@@ -11,7 +11,7 @@ use egui::{
 };
 use mudra_capture::CaptureState;
 use mudra_config::edit::{ActivationEdit, BindingEdit, ContinuousEdit};
-use mudra_config::{Action, Config, Control, KnownGestures};
+use mudra_config::{Action, Config, Control, DeviceSelector, KnownGestures};
 use mudra_gestures::EngineState;
 use mudra_gestures::custom::CustomPose;
 
@@ -96,6 +96,10 @@ pub enum UiAction {
     ReloadConfig,
     OpenConfigFolder,
     OpenLogs,
+    /// La liste des caméras est affichée : à relire si elle date.
+    RefreshCameras,
+    /// Caméra choisie dans la barre du haut, écrite dans la configuration.
+    SelectCamera(DeviceSelector),
 }
 
 pub struct PreviewModel<'a> {
@@ -105,6 +109,9 @@ pub struct PreviewModel<'a> {
     pub frame: Option<&'a PreviewFrame>,
     pub texture: Option<&'a egui::TextureHandle>,
     pub pipeline_error: Option<&'a str>,
+    /// Caméras du PC, dans l'ordre de leur index ; `None` quand Mudra rejoue
+    /// une image fixe au lieu de filmer.
+    pub cameras: Option<&'a [String]>,
     pub record: &'a mut RecordForm,
     pub known: &'a KnownGestures,
     /// Poses personnalisées chargées.
@@ -293,10 +300,80 @@ fn top_bar(ui: &mut Ui, model: &PreviewModel<'_>, tab: &mut Tab, actions: &mut V
             } else {
                 MUTED
             };
-            // Tronqué plutôt que de chevaucher les pastilles d'état quand la place manque.
-            ui.add(egui::Label::new(RichText::new(camera).color(color)).truncate());
+            let text = RichText::new(camera).color(color);
+            match model.cameras {
+                Some(cameras) => camera_menu(ui, text, cameras, model.config, actions),
+                // Tronqué plutôt que de chevaucher les pastilles d'état quand la place manque.
+                None => {
+                    ui.add(egui::Label::new(text).truncate());
+                }
+            }
         });
     });
+}
+
+/// Caméra en service, et liste déroulante pour en changer.
+fn camera_menu(
+    ui: &mut Ui,
+    text: RichText,
+    cameras: &[String],
+    config: &Config,
+    actions: &mut Vec<UiAction>,
+) {
+    let device = &config.camera.device;
+    let chosen = match device {
+        DeviceSelector::Auto => None,
+        DeviceSelector::Index(i) => Some(*i as usize).filter(|i| *i < cameras.len()),
+        DeviceSelector::Name(wanted) => {
+            let wanted = wanted.to_lowercase();
+            cameras
+                .iter()
+                .position(|n| n.to_lowercase().contains(&wanted))
+        }
+    };
+    egui::ComboBox::from_id_salt("camera")
+        .selected_text(text)
+        .width(ui.available_width().min(340.0))
+        .truncate()
+        .show_ui(ui, |ui| {
+            actions.push(UiAction::RefreshCameras);
+            ui.label(RichText::new("CAMÉRA").small().color(MUTED).strong());
+            if ui
+                .selectable_label(*device == DeviceSelector::Auto, "Automatique")
+                .on_hover_text("La première caméra du PC qui fonctionne.")
+                .clicked()
+                && *device != DeviceSelector::Auto
+            {
+                actions.push(UiAction::SelectCamera(DeviceSelector::Auto));
+            }
+            for (index, name) in cameras.iter().enumerate() {
+                let selected = chosen == Some(index);
+                if ui.selectable_label(selected, name).clicked() && !selected {
+                    // Deux caméras du même nom ne se distinguent que par leur index.
+                    let twins = cameras.iter().filter(|n| *n == name).count() > 1;
+                    actions.push(UiAction::SelectCamera(if twins {
+                        DeviceSelector::Index(index as u32)
+                    } else {
+                        DeviceSelector::Name(name.clone())
+                    }));
+                }
+            }
+            if cameras.is_empty() {
+                ui.label(RichText::new("Aucune caméra détectée.").color(AMBER));
+            } else if chosen.is_none() && *device != DeviceSelector::Auto {
+                let wanted = match device {
+                    DeviceSelector::Name(name) => format!("« {name} »"),
+                    _ => "La caméra choisie".to_string(),
+                };
+                ui.label(
+                    RichText::new(format!(
+                        "{wanted} n'est pas branchée : Mudra prend la première disponible."
+                    ))
+                    .small()
+                    .color(AMBER),
+                );
+            }
+        });
 }
 
 fn engine_card(ui: &mut Ui, model: &PreviewModel<'_>) {
@@ -664,8 +741,8 @@ pub(super) fn camera_view(ui: &mut Ui, model: &CameraView<'_>) {
             rect.left_bottom() + Vec2::new(10.0, -10.0),
             Align2::LEFT_BOTTOM,
             format!(
-                "⚠ {:.0} fps au lieu de {} : manque de lumière ?",
-                status.capture.measured_fps, model.config.camera.fps
+                "⚠ {:.0} fps au lieu de {:.0} : manque de lumière ?",
+                status.capture.measured_fps, status.capture.target_fps
             ),
             FontId::proportional(13.0),
             AMBER,

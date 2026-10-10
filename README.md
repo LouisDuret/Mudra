@@ -34,8 +34,11 @@ target\release\mudra.exe
 ```
 
 Au premier lancement, `%APPDATA%\Mudra\config.toml` est créé à partir de
-[config/default.toml](config/default.toml). Pense à y mettre le nom de ta
-caméra (`camera.device`) si ce n'est pas une Logitech StreamCam.
+[config/default.toml](config/default.toml). Mudra prend la première caméra du
+PC qui fonctionne (`camera.device = "auto"`). S'il y en a plusieurs, la liste
+en haut à droite de la fenêtre d'aperçu permet d'en choisir une ; le choix est
+écrit dans la configuration. Si la caméra choisie n'est plus branchée, Mudra
+se rabat sur une autre et le signale.
 
 ## Utilisation
 

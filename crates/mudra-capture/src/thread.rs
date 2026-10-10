@@ -29,6 +29,11 @@ pub struct CaptureStatus {
     pub state: CaptureState,
     pub device: String,
     pub format: Option<NativeFormat>,
+    /// Ce que l'utilisateur doit savoir de l'ouverture (caméra de repli).
+    pub notice: Option<String>,
+    /// Fréquence attendue : celle demandée, ou celle du format ouvert si la
+    /// caméra ne monte pas aussi haut.
+    pub target_fps: f32,
     /// Fréquence mesurée sur la dernière seconde.
     pub measured_fps: f32,
     /// La fréquence réelle s'écarte de plus de 10 % de la cible (EF-03).
@@ -42,6 +47,8 @@ impl Default for CaptureStatus {
             state: CaptureState::Opening,
             device: String::new(),
             format: None,
+            notice: None,
+            target_fps: 0.0,
             measured_fps: 0.0,
             fps_warning: false,
             frames: 0,
@@ -112,6 +119,13 @@ pub fn spawn(
             let error = match factory() {
                 Ok(mut source) => {
                     let (device, format) = source.description();
+                    let notice = source.notice();
+                    // Une caméra à 30 i/s n'est pas « hors cible » parce qu'on en voulait 60.
+                    let target = if format.fps > 0.0 {
+                        (target_fps as f32).min(format.fps)
+                    } else {
+                        target_fps as f32
+                    };
                     tracing::info!(
                         camera = %device,
                         format = %format!("{} {}×{} @ {:.0} fps", format.subtype, format.width, format.height, format.fps),
@@ -121,8 +135,10 @@ pub fn spawn(
                         s.state = CaptureState::Streaming;
                         s.device = device;
                         s.format = Some(format);
+                        s.notice = notice;
+                        s.target_fps = target;
                     });
-                    let error = stream(source.as_mut(), &mut producer, &stop_flag, &shared, target_fps);
+                    let error = stream(source.as_mut(), &mut producer, &stop_flag, &shared, target);
                     if error.is_some() {
                         // La caméra fonctionnait : la panne commence maintenant.
                         attempt = 0;
@@ -164,7 +180,7 @@ fn stream(
     producer: &mut Producer,
     stop: &AtomicBool,
     status: &Mutex<CaptureStatus>,
-    target_fps: u32,
+    target_fps: f32,
 ) -> Option<CaptureError> {
     let mut window_start = Instant::now();
     let mut window_frames = 0u32;
@@ -183,7 +199,7 @@ fn stream(
         let elapsed = window_start.elapsed();
         if elapsed >= Duration::from_secs(1) {
             let fps = window_frames as f32 / elapsed.as_secs_f32();
-            let off = target_fps > 0 && (fps - target_fps as f32).abs() > 0.1 * target_fps as f32;
+            let off = target_fps > 0.0 && (fps - target_fps).abs() > 0.1 * target_fps;
             off_target_seconds = if off { off_target_seconds + 1 } else { 0 };
             // Alerte après 3 secondes consécutives hors cible, pas sur un à-coup.
             let warning = off_target_seconds >= 3;
@@ -264,7 +280,7 @@ mod tests {
         let factory: SourceFactory = Box::new(move || {
             // Premier essai : caméra occupée ; ensuite 20 trames puis débranchement.
             match counter.fetch_add(1, Ordering::SeqCst) {
-                0 => Err(CaptureError::DeviceNotFound("occupée".into())),
+                0 => Err(CaptureError::Other("caméra occupée".into())),
                 _ => Ok(Box::new(Fake { remaining: 20 })),
             }
         });

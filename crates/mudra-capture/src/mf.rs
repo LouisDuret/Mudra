@@ -24,8 +24,7 @@ use windows::Win32::System::Threading::{
 use windows::core::{GUID, Interface, PWSTR, w};
 
 use crate::{
-    CaptureConfig, CaptureError, DeviceInfo, DeviceSelector, Frame, FrameSource, NativeFormat,
-    PixelFormat, now_us,
+    CaptureConfig, CaptureError, DeviceInfo, Frame, FrameSource, NativeFormat, PixelFormat, now_us,
 };
 
 const VIDEO_STREAM: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
@@ -178,6 +177,16 @@ fn native_types(reader: &IMFSourceReader) -> Vec<(IMFMediaType, NativeFormat)> {
     types
 }
 
+/// Noms des caméras du PC, dans l'ordre de leur index. Ne les ouvre pas :
+/// utilisable pendant que l'une d'elles est en service.
+pub fn list_device_names() -> Result<Vec<String>, CaptureError> {
+    let _runtime = MfRuntime::start()?;
+    Ok(enumerate_activates()?
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect())
+}
+
 /// Liste les caméras et leurs formats natifs (EF-01, `mudra devices`).
 pub fn list_devices() -> Result<Vec<DeviceInfo>, CaptureError> {
     let _runtime = MfRuntime::start()?;
@@ -237,33 +246,66 @@ pub struct MfSource {
     format: NativeFormat,
     pixel_format: PixelFormat,
     exact: bool,
+    /// Caméra demandée mais introuvable, remplacée par celle-ci.
+    instead_of: Option<String>,
     seq: u64,
     _runtime: MfRuntime,
 }
 
 impl MfSource {
     /// Ouvre la caméra configurée dans le format demandé ou, à défaut, dans le
-    /// format natif le plus proche (EF-02).
+    /// format natif le plus proche (EF-02). En mode automatique, ou si la
+    /// caméra configurée n'existe pas sur ce PC, la première caméra qui
+    /// s'ouvre est retenue.
     pub fn open(config: &CaptureConfig) -> Result<Self, CaptureError> {
         let runtime = MfRuntime::start()?;
         let devices = enumerate_activates()?;
-        let chosen = match &config.device {
-            DeviceSelector::Index(i) => devices.into_iter().nth(*i as usize),
-            DeviceSelector::Name(wanted) => {
-                let wanted = wanted.to_lowercase();
-                devices
-                    .into_iter()
-                    .find(|(name, _)| name.to_lowercase().contains(&wanted))
+        if devices.is_empty() {
+            return Err(CaptureError::NoDevice);
+        }
+        let names: Vec<String> = devices.iter().map(|(name, _)| name.clone()).collect();
+        let (order, fallback) = config.device.candidates(&names);
+        let mut first_error = None;
+        for index in order {
+            let (name, activate) = &devices[index];
+            match Self::open_device(name, activate, config) {
+                Ok((reader, source, format, exact)) => {
+                    let instead_of = fallback.then(|| config.device.label());
+                    if let Some(wanted) = &instead_of {
+                        tracing::warn!(
+                            demandee = %wanted,
+                            utilisee = %name,
+                            "caméra configurée introuvable, repli sur une autre"
+                        );
+                    }
+                    let this = Self {
+                        reader,
+                        source,
+                        name: name.clone(),
+                        pixel_format: format.pixel_format.unwrap_or_default(),
+                        format,
+                        exact,
+                        instead_of,
+                        seq: 0,
+                        _runtime: runtime,
+                    };
+                    this.apply_camera_settings(config);
+                    return Ok(this);
+                }
+                Err(e) => {
+                    tracing::debug!(camera = %name, erreur = %e, "caméra écartée");
+                    first_error.get_or_insert(e);
+                }
             }
-        };
-        let Some((name, activate)) = chosen else {
-            let label = match &config.device {
-                DeviceSelector::Index(i) => format!("index {i}"),
-                DeviceSelector::Name(n) => n.clone(),
-            };
-            return Err(CaptureError::DeviceNotFound(label));
-        };
+        }
+        Err(first_error.unwrap_or(CaptureError::NoDevice))
+    }
 
+    fn open_device(
+        name: &str,
+        activate: &IMFActivate,
+        config: &CaptureConfig,
+    ) -> Result<(IMFSourceReader, IMFMediaSource, NativeFormat, bool), CaptureError> {
         // SAFETY: objets COM valides ; la source est arrêtée dans `Drop`.
         let source = unsafe { activate.ActivateObject::<IMFMediaSource>() }
             .map_err(platform("ouverture de la caméra"))?;
@@ -272,36 +314,24 @@ impl MfSource {
             let types = native_types(&reader);
             let formats: Vec<NativeFormat> = types.iter().map(|(_, f)| f.clone()).collect();
             let (index, exact) = choose_format(&formats, config)
-                .ok_or_else(|| CaptureError::NoUsableFormat(name.clone()))?;
+                .ok_or_else(|| CaptureError::NoUsableFormat(name.to_string()))?;
             let (media_type, format) = &types[index];
             // SAFETY: type natif issu de ce lecteur.
             unsafe { reader.SetCurrentMediaType(VIDEO_STREAM, None, media_type) }
                 .map_err(platform("SetCurrentMediaType"))?;
             Ok::<_, CaptureError>((reader, format.clone(), exact))
         })();
-        let (reader, format, exact) = match opened {
-            Ok(v) => v,
+        match opened {
+            Ok((reader, format, exact)) => Ok((reader, source, format, exact)),
             Err(e) => {
                 // SAFETY: libère la caméra si l'ouverture échoue en cours de route.
                 unsafe {
                     let _ = source.Shutdown();
+                    let _ = activate.ShutdownObject();
                 }
-                return Err(e);
+                Err(e)
             }
-        };
-        let pixel_format = format.pixel_format.unwrap_or_default();
-        let this = Self {
-            reader,
-            source,
-            name,
-            format,
-            pixel_format,
-            exact,
-            seq: 0,
-            _runtime: runtime,
-        };
-        this.apply_camera_settings(config);
-        Ok(this)
+        }
     }
 
     /// Vrai si le format ouvert est exactement celui demandé.
@@ -411,6 +441,15 @@ impl FrameSource for MfSource {
     fn description(&self) -> (String, NativeFormat) {
         (self.name.clone(), self.format.clone())
     }
+
+    fn notice(&self) -> Option<String> {
+        self.instead_of.as_ref().map(|wanted| {
+            format!(
+                "Caméra « {wanted} » introuvable : « {} » est utilisée à la place",
+                self.name
+            )
+        })
+    }
 }
 
 impl Drop for MfSource {
@@ -440,6 +479,7 @@ pub fn promote_current_thread() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DeviceSelector;
 
     fn format(
         subtype: &str,

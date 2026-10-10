@@ -9,7 +9,7 @@ overlay = true                    # petit overlay d'état au premier plan (EF-37
 autostart = false                 # lancement à l'ouverture de session (EF-74)
 
 [camera]
-device = "Logitech StreamCam"     # sous-chaîne du nom, ou index (0, 1…)
+device = "auto"                   # "auto", sous-chaîne du nom, ou index (0, 1…)
 format = "mjpeg"                  # mjpeg | nv12 | yuy2
 width = 1280
 height = 720
