@@ -190,11 +190,37 @@ pub fn resolve_model_path(raw: &str) -> PathBuf {
     if let Ok(cwd) = std::env::current_dir() {
         bases.push(cwd);
     }
-    bases
-        .iter()
-        .map(|b| b.join(&expanded))
-        .find(|p| p.exists())
-        .unwrap_or(expanded)
+    let found = bases.iter().map(|b| b.join(&expanded)).find(|p| p.exists());
+    #[cfg(feature = "embed-models")]
+    if found.is_none()
+        && let Some(path) = extract_embedded_model(&expanded)
+    {
+        return path;
+    }
+    found.unwrap_or(expanded)
+}
+
+/// Binaire autonome (`--features embed-models`) : les modèles de vision sont dans l'exécutable et extraits au premier besoin dans le dossier de configuration.
+#[cfg(feature = "embed-models")]
+fn extract_embedded_model(rel: &Path) -> Option<PathBuf> {
+    const MODELS: [(&str, &[u8]); 2] = [
+        (
+            "palm_detection_mediapipe_2023feb.onnx",
+            include_bytes!("../../../models/palm_detection_mediapipe_2023feb.onnx"),
+        ),
+        (
+            "handpose_estimation_mediapipe_2023feb.onnx",
+            include_bytes!("../../../models/handpose_estimation_mediapipe_2023feb.onnx"),
+        ),
+    ];
+    let name = rel.file_name()?.to_str()?;
+    let (_, bytes) = MODELS.iter().find(|(n, _)| *n == name)?;
+    let dest = config_dir().ok()?.join(rel);
+    std::fs::create_dir_all(dest.parent()?).ok()?;
+    let tmp = dest.with_extension("part");
+    std::fs::write(&tmp, bytes).ok()?;
+    std::fs::rename(&tmp, &dest).ok()?;
+    Some(dest)
 }
 
 #[cfg(test)]

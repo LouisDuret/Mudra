@@ -20,6 +20,10 @@ allow = [
 ]
 confidence-threshold = 0.9
 
+[[licenses.exceptions]]
+crate = "webpki-root-certs"
+allow = ["CDLA-Permissive-2.0"]
+
 [bans]
 multiple-versions = "allow"
 

@@ -1,0 +1,27 @@
+# Publication : un tag vX.Y.Z construit le zip et l'exe autonome
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Tag = version de Cargo.toml
+        run: |
+          $v = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ("v$v" -ne $env:GITHUB_REF_NAME) { throw "Tag $env:GITHUB_REF_NAME, mais Cargo.toml est en version $v" }
+      - run: powershell -ExecutionPolicy Bypass -File scripts\package.ps1 -Mode zip
+      - run: powershell -ExecutionPolicy Bypass -File scripts\package.ps1 -Mode exe
+      - run: gh release create $env:GITHUB_REF_NAME (Get-ChildItem dist).FullName --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

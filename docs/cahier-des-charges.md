@@ -41,7 +41,7 @@ Sommaire
 
 3. Architecture d'ensemble
 
-4. Décisions techniques (D-01 à D-20)
+4. Décisions techniques (D-01 à D-19)
 
 5. Exigences fonctionnelles
 
@@ -113,7 +113,7 @@ Entraîner un réseau directement sur les images de la webcam demanderait des mi
 | Composant | Caractéristiques | Conséquences pour le projet |
 |---|---|---|
 | Système | Windows 10 22H2 ou Windows 11, x64 | API Win32/COM via le crate windows ; Media Foundation disponible. |
-| CPU | Intel Core i7-10700K, 8 cœurs / 16 threads, 3,8 GHz | AVX2 disponible, pas d'AVX-512. Compilation avec target-cpu=native. |
+| CPU | Intel Core i7-10700K, 8 cœurs / 16 threads, 3,8 GHz | AVX2 disponible, pas d'AVX-512. |
 | GPU | NVIDIA GeForce RTX 3070, 8 Go, DirectX 12 | Inférence de la vision via DirectML (ou CUDA/TensorRT en option). |
 | Webcam | Logitech StreamCam, USB-C (USB 3.1 Gen 1), champ 78°, autofocus<br>Résolutions : 1920×1080, 1280×720, 960×540, 848×480, 640×360, 320×240 | 60 fps uniquement en MJPEG ; YUY2/NV12 plafonnés à 30 fps.<br>Le décodage MJPEG est donc dans le chemin chaud (voir D-03, D-04). |
 | Toolchain Rust | Rust stable (édition 2024), cible x86_64-pc-windows-msvc | Visual Studio Build Tools (MSVC + Windows SDK) requis. |
@@ -183,7 +183,6 @@ Ces décisions sont figées. Une révision exige une mesure et un ADR (voir §0)
 | D-17 | Concurrence | Threads natifs + crossbeam-channel. Pas de runtime async (tokio) dans le chemin chaud. | Charge temps réel liée au calcul : l'async n'apporte rien et ajoute de la gigue. |
 | D-18 | Observabilité | tracing avec journaux fichiers rotatifs dans %LOCALAPPDATA%\Mudra\logs, histogrammes de latence par étage (hdrhistogram), feature optionnelle profiling (tracing-tracy). | Mesurer avant d'optimiser ; pas de journalisation par trame au niveau info. |
 | D-19 | Gestion d'erreurs | thiserror dans les bibliothèques, anyhow dans le binaire. Aucun unwrap() hors tests et invariants documentés. | Erreurs explicites et remontées à l'utilisateur. |
-| D-20 | Compilation release | lto = "fat", codegen-units = 1, opt-level = 3, debug = "line-tables-only" ; -C target-cpu=native via .cargo/config.toml. | Binaire destiné à cette machine uniquement : on exploite AVX2 sans compromis. |
 
 ## 5. Exigences fonctionnelles
 
@@ -470,8 +469,7 @@ training/
 
 ```
 mudra/
-├─ Cargo.toml                  # workspace + profils release (D-20)
-├─ .cargo/config.toml          # target-cpu=native
+├─ Cargo.toml                  # workspace + profils release
 ├─ crates/
 │  ├─ mudra-app/             # binaire : CLI, tray, aperçu, orchestration
 │  ├─ mudra-capture/         # Media Foundation, FrameSource, réglages caméra

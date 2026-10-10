@@ -32,6 +32,9 @@ mudra-dataset.workspace = true
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_SystemInformation", "Win32_System_Console", "Win32_System_Threading", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_Security", "Win32_UI_WindowsAndMessaging", "Win32_System_Diagnostics_Debug", "Win32_UI_Shell", "Win32_System_LibraryLoader", "Win32_UI_HiDpi"] }
 rfd = { version = "0.17.2", default-features = false }
 
+[features]
+embed-models = ["mudra-config/embed-models"]
+
 [[bin]]
 name = "mudra"
 path = "src/main.rs"
