@@ -42,7 +42,6 @@ wgpu = "30"
 pollster = "1"
 proptest = "1"
 
-# D-20 : binaire destiné à cette machine uniquement.
 [profile.release]
 lto = "fat"
 codegen-units = 1

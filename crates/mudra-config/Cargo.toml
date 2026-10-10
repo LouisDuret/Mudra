@@ -10,3 +10,6 @@ serde.workspace = true
 toml.workspace = true
 thiserror.workspace = true
 toml_edit = "0.25.17"
+
+[features]
+embed-models = []

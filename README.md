@@ -25,7 +25,7 @@ que pour entraîner tes propres classifieurs ([uv](https://docs.astral.sh/uv/)).
 # 1. Modèles de vision MediaPipe Hands (ONNX, Apache 2.0), vérifiés par SHA-256
 powershell -ExecutionPolicy Bypass -File scripts\fetch-models.ps1
 
-# 2. Compilation (binaire optimisé pour cette machine : target-cpu=native)
+# 2. Compilation
 cargo build --release
 
 # 3. Vérifier la caméra, puis lancer
@@ -39,6 +39,21 @@ PC qui fonctionne (`camera.device = "auto"`). S'il y en a plusieurs, la liste
 en haut à droite de la fenêtre d'aperçu permet d'en choisir une ; le choix est
 écrit dans la configuration. Si la caméra choisie n'est plus branchée, Mudra
 se rabat sur une autre et le signale.
+
+### Distribuer à d'autres machines
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\package.ps1 -Mode zip   # dist\Mudra-<version>.zip
+powershell -ExecutionPolicy Bypass -File scripts\package.ps1 -Mode exe   # dist\mudra-<version>.exe
+```
+
+Le **zip** contient l'exécutable, `DirectML.dll` et `models\` : il suffit de
+le décompresser. L'**exe** est autonome : les modèles de vision sont embarqués
+et extraits au premier lancement dans `%APPDATA%\Mudra\models`, et DirectML est
+celui de Windows.
+
+Pousser un tag `vX.Y.Z`, égal à la version de `Cargo.toml`, fait tout cela sur
+GitHub Actions et publie les deux fichiers dans une Release.
 
 ## Utilisation
 

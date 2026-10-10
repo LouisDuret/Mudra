@@ -1,3 +1,0 @@
-# D-20 : exploite AVX2 sur la machine cible.
-[target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-cpu=native"]
