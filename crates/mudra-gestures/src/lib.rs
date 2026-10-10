@@ -9,6 +9,7 @@ pub mod engine;
 pub mod geometry;
 pub mod one_euro;
 pub mod onnx;
+pub mod stabilizer;
 pub mod stage;
 pub mod window;
 

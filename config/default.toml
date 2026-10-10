@@ -129,3 +129,5 @@ active_zone = [0.2, 0.2, 0.8, 0.8]  # x0, y0, x1, y1 normalisés
 click = "pinch"
 min_cutoff = 0.8                  # profil One Euro dédié à la souris
 beta = 1.0
+stabilization_ms = 50             # ignore les sauts d'une image, amortit le reste ; 0 = sans
+halo = true                       # halo vert autour du curseur pendant le contrôle

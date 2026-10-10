@@ -40,6 +40,12 @@ reconnue en `hold_ms + 30 ms` : impossible avec 380 ms de traînée.
 - Souris : `min_cutoff = 0,8`, `beta = 1,0`, appliqué au bout de l'index **non
   lissé**. Filtrer une seconde fois des points déjà lissés ajouterait les deux
   retards ; le profil souris est donc le seul filtre sur le trajet du curseur.
+- Souris, ajout ultérieur : une stabilisation précède ce profil
+  (`stabilization_ms = 50`). Une médiane sur trois échantillons écarte les
+  sauts d'une image dus au suivi, que le One Euro laissait passer en partie
+  puisque sa coupure monte avec la vitesse ; un passe-bas du premier ordre
+  amortit le reste. Coût : une image plus 50 ms de retard, soit environ 67 ms
+  à 60 images/s. `stabilization_ms = 0` revient au comportement précédent.
 
 Ces valeurs sont celles de `config/default.toml` ; elles restent modifiables à
 chaud.

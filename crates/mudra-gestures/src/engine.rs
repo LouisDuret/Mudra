@@ -6,6 +6,7 @@
 use mudra_config::{ActivationMode, Config, Control, HandFilter};
 
 use crate::one_euro::OneEuro;
+use crate::stabilizer::Stabilizer;
 use crate::{Handedness, NONE_LABEL, argmax};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -331,6 +332,8 @@ struct ActiveContinuous {
     last_volume: f32,
     filter_x: OneEuro,
     filter_y: OneEuro,
+    steady_x: Stabilizer,
+    steady_y: Stabilizer,
     last_us: u64,
 }
 
@@ -803,11 +806,14 @@ impl Engine {
         h: &HandObs<'_>,
         events: &mut Vec<EngineEvent>,
     ) {
-        let (min_cutoff, beta) = match &self.cfg.continuous[slot].control {
+        let (min_cutoff, beta, steady) = match &self.cfg.continuous[slot].control {
             Control::Mouse {
-                min_cutoff, beta, ..
-            } => (*min_cutoff, *beta),
-            Control::Volume { .. } => (1.0, 0.0),
+                min_cutoff,
+                beta,
+                stabilization_ms,
+                ..
+            } => (*min_cutoff, *beta, *stabilization_ms as f32 * 1e-3),
+            Control::Volume { .. } => (1.0, 0.0, 0.0),
         };
         self.continuous = Some(ActiveContinuous {
             slot,
@@ -819,6 +825,8 @@ impl Engine {
             last_volume: 0.0,
             filter_x: OneEuro::new(min_cutoff, beta, 1.0),
             filter_y: OneEuro::new(min_cutoff, beta, 1.0),
+            steady_x: Stabilizer::new(steady),
+            steady_y: Stabilizer::new(steady),
             last_us: now_us,
         });
         self.transition(EngineState::Continuous, Reason::ContinuousEnter, events);
@@ -934,8 +942,16 @@ impl Engine {
                 let sy = (y1 - y0) / h.palm[1].max(1e-6);
                 let u = ((h.index_tip[0] - x0) / (x1 - x0)).clamp(0.0, 1.0);
                 let v = ((h.index_tip[1] - y0) / (y1 - y0)).clamp(0.0, 1.0);
-                let x = active.filter_x.filter(u * sx, dt) / sx;
-                let y = active.filter_y.filter(v * sy, dt) / sy;
+                // Les sauts d'une image sont écartés avant le One Euro, dont
+                // la fréquence de coupure monterait avec leur vitesse apparente.
+                let x = active
+                    .filter_x
+                    .filter(active.steady_x.filter(u * sx, dt), dt)
+                    / sx;
+                let y = active
+                    .filter_y
+                    .filter(active.steady_y.filter(v * sy, dt), dt)
+                    / sy;
                 events.push(EngineEvent::ContinuousUpdate {
                     control,
                     value: ContinuousValue::MouseMove {

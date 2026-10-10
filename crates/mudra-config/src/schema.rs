@@ -551,6 +551,9 @@ fn default_mouse_min_cutoff() -> f32 {
 fn default_mouse_beta() -> f32 {
     1.0
 }
+fn default_stabilization_ms() -> u64 {
+    50
+}
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -574,6 +577,13 @@ pub enum Control {
         min_cutoff: f32,
         #[serde(default = "default_mouse_beta")]
         beta: f32,
+        /// Stabilisation temporelle du curseur : écarte les sauts d'une image
+        /// puis amortit le reste sur cette durée. 0 la désactive.
+        #[serde(default = "default_stabilization_ms")]
+        stabilization_ms: u64,
+        /// Halo vert autour du curseur tant que l'index le pilote.
+        #[serde(default = "enabled_by_default")]
+        halo: bool,
         #[serde(default)]
         target: MouseTarget,
     },

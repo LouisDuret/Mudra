@@ -14,7 +14,7 @@ use crossbeam_channel::bounded;
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use mudra_actions::{ActionSender, Feedback};
-use mudra_config::{Config, InternalOp, Level};
+use mudra_config::{Config, Control, InternalOp, Level};
 use mudra_gestures::EngineState;
 use mudra_gestures::engine::Reason;
 use notify::{RecursiveMode, Watcher};
@@ -27,6 +27,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::platform::windows::WindowAttributesExtWindows;
 use winit::window::{Window, WindowId, WindowLevel};
 
+use crate::halo::Halo;
 use crate::pipeline::{
     self, Command, Options, Pipeline, PipelineEvent, PreviewFrame, RecordEvent, RecordKind,
     RecordRequest, Source, Status,
@@ -195,6 +196,10 @@ struct App {
     started: Instant,
     /// Destruction différée de la fenêtre d'overlay une fois masquée.
     overlay_destroy_at: Option<Instant>,
+    /// Halo du curseur, créé au premier contrôle de la souris.
+    halo: Option<Halo>,
+    /// Un contrôle de la souris qui demande le halo est en cours.
+    halo_wanted: bool,
     log: VecDeque<LogEntry>,
     record: RecordForm,
     /// Gestes des classifieurs chargés, pour l'onglet « Gestes ».
@@ -306,6 +311,8 @@ pub fn run(config_path: PathBuf, explicit: bool, options: RunOptions) -> Result<
         overlay_wanted: false,
         started: Instant::now(),
         overlay_destroy_at: None,
+        halo: None,
+        halo_wanted: false,
         log: VecDeque::with_capacity(128),
         record: RecordForm::default(),
         known,
@@ -448,6 +455,8 @@ impl App {
     }
 
     fn start_pipeline(&mut self) {
+        self.halo_wanted = false;
+        self.refresh_halo();
         // L'ancien pipeline est arrêté d'abord : la caméra doit être libre.
         let was_paused = self
             .pipeline
@@ -494,6 +503,18 @@ impl App {
         };
         if let Some(tray) = &mut self.tray {
             tray.show(kind, &text);
+        }
+    }
+
+    /// Le halo entoure le curseur tant que l'index le pilote réellement : en
+    /// mode essai, la souris ne bouge pas.
+    fn refresh_halo(&mut self) {
+        let visible = self.halo_wanted && !self.gestures.dry_run;
+        if visible && self.halo.is_none() {
+            self.halo = Halo::spawn();
+        }
+        if let Some(halo) = &mut self.halo {
+            halo.set_visible(visible);
         }
     }
 
@@ -762,6 +783,7 @@ impl App {
                 if let Some(pipeline) = &self.pipeline {
                     pipeline.send(Command::SetDryRun(on));
                 }
+                self.refresh_halo();
                 self.log(
                     LogKind::Info,
                     if on {
@@ -908,6 +930,10 @@ impl App {
         match event {
             PipelineEvent::State { to, reason, .. } => {
                 self.status.state = to;
+                if to != EngineState::Continuous {
+                    self.halo_wanted = false;
+                    self.refresh_halo();
+                }
                 let why = match reason {
                     Reason::WakeGesture => "geste de réveil",
                     Reason::LockGesture => "geste de verrouillage",
@@ -964,6 +990,11 @@ impl App {
                 }
             }
             PipelineEvent::Continuous { name, active } => {
+                self.halo_wanted = active
+                    && self.config.continuous.iter().any(|c| {
+                        c.name == name && matches!(c.control, Control::Mouse { halo: true, .. })
+                    });
+                self.refresh_halo();
                 self.log(
                     LogKind::State,
                     format!(

@@ -395,6 +395,7 @@ pub fn validate(config: &Config, known: &KnownGestures) -> Vec<Issue> {
                 click,
                 min_cutoff,
                 beta,
+                stabilization_ms,
                 ..
             } => {
                 let [x0, y0, x1, y1] = *active_zone;
@@ -416,6 +417,12 @@ pub fn validate(config: &Config, known: &KnownGestures) -> Vec<Issue> {
                     100.0,
                 );
                 c.range(&format!("{field}.control.beta"), *beta, 0.0, 100.0);
+                c.range(
+                    &format!("{field}.control.stabilization_ms"),
+                    *stabilization_ms as f32,
+                    0.0,
+                    500.0,
+                );
             }
         }
     }

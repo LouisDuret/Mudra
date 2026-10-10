@@ -57,7 +57,7 @@ Gestes livrés par défaut (Annexe B du cahier des charges) :
 | Rock (index + auriculaire) | lancer un programme (Bloc-notes par défaut : à remplacer) |
 | Trois doigts | afficher le bureau (Win+D) |
 | Pincement maintenu | volume continu : monter ou descendre la main |
-| Index tendu | souris : le curseur suit l'index, pincer pour cliquer |
+| Index tendu | souris : le curseur suit l'index, entouré d'un halo vert ; pincer pour cliquer |
 | Deux paumes ouvertes | vue des tâches (Win+Tab) |
 | Balayage gauche / droite, paume ouverte | piste précédente / suivante |
 | Balayage haut / bas | lecture-pause / couper le son |
@@ -68,6 +68,11 @@ configuration et de journaux. Un petit overlay en bas de l'écran rappelle
 l'état quand le moteur est armé et annonce chaque action.
 
 ![Overlay d'état](docs/images/overlay.png)
+
+Pendant le contrôle de la souris, un halo vert suit le curseur (`halo = false`
+dans le contrôle `mouse` pour le retirer). Le curseur est stabilisé : les sauts
+d'une image dus au suivi sont ignorés et le reste est amorti sur
+`stabilization_ms` (50 ms par défaut, 0 pour un suivi brut).
 
 ### Ligne de commande
 

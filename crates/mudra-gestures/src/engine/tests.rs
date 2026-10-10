@@ -434,6 +434,44 @@ fn mouse_moves_and_clicks_with_hysteresis() {
     );
 }
 
+/// Plus grand écart du curseur après un saut du bout de l'index d'une seule image.
+fn cursor_jump_after_glitch(stabilization_ms: u64) -> f32 {
+    let mut config =
+        mudra_config::parse(mudra_config::DEFAULT_CONFIG_TOML, Path::new("default.toml")).unwrap();
+    for c in &mut config.continuous {
+        if let Control::Mouse {
+            stabilization_ms: ms,
+            ..
+        } = &mut c.control
+        {
+            *ms = stabilization_ms;
+        }
+    }
+    let mut rig = Rig::new(config);
+    rig.arm();
+    rig.hold("pointing", 0.95, 350);
+    rig.hold_with("pointing", 0.95, 600, |o| o.index_tip = [0.5, 0.5]);
+    let mut events = rig.hold_with("pointing", 0.95, 1, |o| o.index_tip = [0.62, 0.5]);
+    events.extend(rig.hold_with("pointing", 0.95, 400, |o| o.index_tip = [0.5, 0.5]));
+    events
+        .iter()
+        .filter_map(|e| match e {
+            EngineEvent::ContinuousUpdate {
+                value: ContinuousValue::MouseMove { x, .. },
+                ..
+            } => Some((x - 0.5).abs()),
+            _ => None,
+        })
+        .fold(0.0, f32::max)
+}
+
+#[test]
+fn mouse_ignores_single_frame_tracking_glitch() {
+    // Sans stabilisation, le curseur part avec le saut (20 % de l'écran ici).
+    assert!(cursor_jump_after_glitch(0) > 0.03);
+    assert!(cursor_jump_after_glitch(50) < 0.001);
+}
+
 #[test]
 fn leaving_mouse_mode_releases_button() {
     let mut rig = Rig::default();

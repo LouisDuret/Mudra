@@ -7,6 +7,7 @@
 
 mod app;
 mod cli;
+mod halo;
 mod metrics;
 mod pipeline;
 mod platform;
