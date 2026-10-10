@@ -109,6 +109,8 @@ hand = "both"
 hold_ms = 500
 action = { type = "keys", combo = "Win+Tab" }   # vue des tâches
 
+# `enabled = false` désactive un contrôle sans perdre ses réglages : sa pose
+# d'entrée redevient libre pour un binding.
 [[continuous]]
 name = "volume"
 enter_gesture = "pinch"

@@ -255,6 +255,9 @@ impl Resolved {
             .iter()
             .enumerate()
             .filter_map(|(index, c)| {
+                if !c.enabled {
+                    return None;
+                }
                 let click_label = match &c.control {
                     Control::Mouse {
                         click: Some(click), ..

@@ -390,9 +390,13 @@ pub fn validate(config: &Config, known: &KnownGestures) -> Vec<Issue> {
                 "une pose à deux mains ne peut pas piloter un contrôle continu",
             );
         }
+        // Un contrôle désactivé ne prend sa pose à personne.
+        if !k.enabled {
+            continue;
+        }
         if config.continuous[..i]
             .iter()
-            .any(|o| o.enter_gesture == k.enter_gesture && o.hand == k.hand)
+            .any(|o| o.enabled && o.enter_gesture == k.enter_gesture && o.hand == k.hand)
         {
             c.error(
                 format!("{field}.enter_gesture"),

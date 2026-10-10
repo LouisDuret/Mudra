@@ -513,6 +513,9 @@ fn default_enter_hold_ms() -> u64 {
 #[serde(deny_unknown_fields)]
 pub struct Continuous {
     pub name: String,
+    /// Désactivé, le contrôle garde ses réglages mais libère sa pose d'entrée.
+    #[serde(default = "enabled_by_default", skip_serializing_if = "is_true")]
+    pub enabled: bool,
     pub enter_gesture: String,
     #[serde(default = "default_enter_hold_ms")]
     pub enter_hold_ms: u64,

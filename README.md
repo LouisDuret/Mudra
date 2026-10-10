@@ -118,8 +118,16 @@ modifier, désactiver, tester ou supprimer une action. Chaque modification est
 écrite tout de suite dans `config.toml` (commentaires conservés) et appliquée
 sans redémarrer ; « Annuler la dernière modification » restaure le fichier
 précédent. Le « Mode essai » reconnaît les gestes sans exécuter les actions.
-Les contrôles continus, les séquences et les commandes se règlent encore dans
-le fichier.
+
+Les gestes « réservés » se changent au même endroit. La carte **Activation**
+choisit le mode (geste d'armement ou toujours actif) et les poses qui arment
+et verrouillent Mudra ; la carte **Contrôles continus**, en bas, choisit la
+pose d'entrée de chaque contrôle et permet de le désactiver sans perdre ses
+réglages (`enabled = false`). Une pose qui perd son rôle redevient une pose
+ordinaire, à laquelle tu peux associer une action ; une action déjà posée sur
+une pose qui prend un rôle est gardée mais ignorée. Les autres réglages des
+contrôles continus, les séquences et les commandes se règlent encore dans le
+fichier.
 
 Geste à deux mains : ajoute `hand = "both"` à un binding de pose statique.
 Il part quand les deux mains tiennent la même pose pendant `hold_ms`, et il a

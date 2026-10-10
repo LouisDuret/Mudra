@@ -5,11 +5,11 @@
 use std::time::Instant;
 
 use egui::{Align, CornerRadius, Layout, Margin, RichText, Stroke, Ui};
-use mudra_config::edit::BindingEdit;
+use mudra_config::edit::{ActivationEdit, BindingEdit, ContinuousEdit};
 use mudra_config::keys::KeyCombo;
 use mudra_config::{
-    Action, ActivationMode, Binding, Config, HandFilter, KnownGestures, MediaKey, ScreenshotTarget,
-    VolumeMode, VolumeOp,
+    Action, ActivationMode, Binding, Config, Control, HandFilter, KnownGestures, MediaKey,
+    ScreenshotTarget, VolumeMode, VolumeOp,
 };
 
 use mudra_gestures::custom::{CustomPose, SENSITIVITY_RANGE};
@@ -202,22 +202,115 @@ fn capitalized(text: &str) -> String {
     }
 }
 
-/// Rôle d'un geste qui n'est pas libre pour un binding à une main.
+/// Rôle d'un geste qui n'est pas libre pour un binding à une main, et où ce
+/// rôle se change.
 fn reserved_role(config: &Config, gesture: &str) -> Option<String> {
     let a = &config.activation;
     if a.mode == ActivationMode::WakeGesture {
         if gesture == a.wake_gesture {
-            return Some("Réservé : arme Mudra".into());
+            return Some("Réservé : arme Mudra · se change dans « Activation »".into());
         }
         if gesture == a.lock_gesture {
-            return Some("Réservé : verrouille Mudra".into());
+            return Some("Réservé : verrouille Mudra · se change dans « Activation »".into());
         }
     }
     config
         .continuous
         .iter()
-        .find(|c| c.enter_gesture == gesture)
-        .map(|c| format!("Réservé : contrôle continu « {} »", c.name))
+        .find(|c| c.enabled && c.enter_gesture == gesture)
+        .map(|c| {
+            format!(
+                "Réservé : contrôle continu « {} » · se change dans « Contrôles continus »",
+                c.name
+            )
+        })
+}
+
+/// Poses qu'un rôle (armement, verrouillage, contrôle continu) peut prendre :
+/// celles à une main qui n'en ont pas déjà un, plus `current`.
+fn role_choices<'a>(config: &Config, known: &'a KnownGestures, current: &str) -> Vec<&'a String> {
+    known
+        .static_
+        .iter()
+        .filter(|g| {
+            g.as_str() == current
+                || (g.as_str() != "none"
+                    && !known.is_two_hands(g)
+                    && reserved_role(config, g).is_none())
+        })
+        .collect()
+}
+
+/// Liste déroulante d'une pose ; renvoie la pose choisie si elle change.
+fn pose_combo(ui: &mut Ui, id: &str, current: &str, choices: &[&String]) -> Option<String> {
+    let mut picked = None;
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(theme::gesture_name(current))
+        .width(170.0)
+        .show_ui(ui, |ui| {
+            for choice in choices {
+                let selected = choice.as_str() == current;
+                if ui
+                    .selectable_label(selected, theme::gesture_name(choice))
+                    .clicked()
+                    && !selected
+                {
+                    picked = Some(choice.to_string());
+                }
+            }
+        });
+    picked
+}
+
+/// Mode d'activation et poses d'armement et de verrouillage.
+fn activation_card(
+    ui: &mut Ui,
+    config: &Config,
+    known: &KnownGestures,
+    actions: &mut Vec<UiAction>,
+) {
+    let a = &config.activation;
+    let wake_mode = a.mode == ActivationMode::WakeGesture;
+    ui.label(RichText::new("ACTIVATION").small().color(MUTED).strong());
+    ui.label(activation_text(config));
+    ui.add_space(2.0);
+    ui.horizontal_wrapped(|ui| {
+        for (mode, label, hint) in [
+            (
+                ActivationMode::WakeGesture,
+                "Geste d'armement",
+                "Les gestes n'agissent qu'après la pose d'armement.",
+            ),
+            (
+                ActivationMode::AlwaysOn,
+                "Toujours actif",
+                "Les gestes agissent en permanence : les poses d'armement et de \
+                 verrouillage redeviennent libres.",
+            ),
+        ] {
+            if ui
+                .selectable_label(a.mode == mode, label)
+                .on_hover_text(hint)
+                .clicked()
+                && a.mode != mode
+            {
+                actions.push(UiAction::EditActivation(ActivationEdit::Mode(mode)));
+            }
+        }
+        if wake_mode {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Armer avec").color(MUTED));
+            let choices = role_choices(config, known, &a.wake_gesture);
+            if let Some(pose) = pose_combo(ui, "pose-armement", &a.wake_gesture, &choices) {
+                actions.push(UiAction::EditActivation(ActivationEdit::WakeGesture(pose)));
+            }
+            ui.label(RichText::new("Verrouiller avec").color(MUTED));
+            let choices = role_choices(config, known, &a.lock_gesture);
+            if let Some(pose) = pose_combo(ui, "pose-verrouillage", &a.lock_gesture, &choices) {
+                actions.push(UiAction::EditActivation(ActivationEdit::LockGesture(pose)));
+            }
+        }
+    });
 }
 
 /// Confiance du geste s'il est montré en ce moment par une main.
@@ -1046,10 +1139,7 @@ pub fn draw(ui: &mut Ui, model: &mut PreviewModel<'_>, actions: &mut Vec<UiActio
                 ui.label(RichText::new(error).color(RED));
             }
             ui.add_space(6.0);
-            framed(ui, CARD, |ui| {
-                ui.label(RichText::new("ACTIVATION").small().color(MUTED).strong());
-                ui.label(activation_text(config));
-            });
+            framed(ui, CARD, |ui| activation_card(ui, config, known, actions));
 
             let sections = [
                 Section {
@@ -1123,22 +1213,58 @@ pub fn draw(ui: &mut Ui, model: &mut PreviewModel<'_>, actions: &mut Vec<UiActio
                             .strong(),
                     );
                     ui.label(
-                        RichText::new("Réglables dans le fichier de configuration.")
-                            .small()
-                            .color(MUTED),
+                        RichText::new(
+                            "La pose d'entrée se choisit ici ; les autres réglages restent \
+                             dans le fichier de configuration.",
+                        )
+                        .small()
+                        .color(MUTED),
                     );
                 });
                 framed(ui, CARD, |ui| {
-                    for control in &config.continuous {
+                    for (index, control) in config.continuous.iter().enumerate() {
                         let active = status.continuous.as_deref() == Some(control.name.as_str());
                         ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(theme::gesture_name(&control.enter_gesture)).strong(),
-                            );
+                            let mut enabled = control.enabled;
+                            let toggle = if enabled { "Actif" } else { "Inactif" };
+                            if ui
+                                .toggle_value(&mut enabled, toggle)
+                                .on_hover_text(
+                                    "Désactivé, le contrôle garde ses réglages et sa pose \
+                                     redevient libre.",
+                                )
+                                .changed()
+                            {
+                                actions.push(UiAction::EditContinuous(
+                                    index,
+                                    ContinuousEdit::SetEnabled(enabled),
+                                ));
+                            }
+                            let mut choices = role_choices(config, known, &control.enter_gesture);
+                            // La pose du clic ne peut pas aussi ouvrir le contrôle.
+                            if let Control::Mouse {
+                                click: Some(click), ..
+                            } = &control.control
+                            {
+                                choices.retain(|pose| *pose != click);
+                            }
+                            let id = format!("pose-continu-{index}");
+                            if let Some(pose) =
+                                pose_combo(ui, &id, &control.enter_gesture, &choices)
+                            {
+                                actions.push(UiAction::EditContinuous(
+                                    index,
+                                    ContinuousEdit::EnterGesture(pose),
+                                ));
+                            }
                             ui.label(RichText::new("maintenu").color(MUTED));
-                            ui.label(format!("contrôle « {} »", control.name));
+                            let name = format!("contrôle « {} »", control.name);
+                            let color = if control.enabled { theme::TEXT } else { MUTED };
+                            ui.label(RichText::new(name).color(color));
                             if active {
                                 ui.label(RichText::new("actif").small().color(GREEN));
+                            } else if !control.enabled {
+                                ui.label(RichText::new("désactivé").small().color(MUTED));
                             }
                         });
                     }

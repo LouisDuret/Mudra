@@ -10,7 +10,7 @@ use egui::{
     Stroke, Ui, Vec2,
 };
 use mudra_capture::CaptureState;
-use mudra_config::edit::BindingEdit;
+use mudra_config::edit::{ActivationEdit, BindingEdit, ContinuousEdit};
 use mudra_config::{Action, Config, Control, KnownGestures};
 use mudra_gestures::EngineState;
 use mudra_gestures::custom::CustomPose;
@@ -60,6 +60,10 @@ pub enum Tab {
 pub enum UiAction {
     /// Onglet « Gestes » : modification d'un binding, écrite dans le fichier.
     EditBinding(BindingEdit),
+    /// Onglet « Gestes » : mode et poses d'armement et de verrouillage.
+    EditActivation(ActivationEdit),
+    /// Onglet « Gestes » : contrôle continu d'indice donné dans la configuration.
+    EditContinuous(usize, ContinuousEdit),
     UndoEdit,
     TestAction(Action),
     SetDryRun(bool),

@@ -626,6 +626,42 @@ fn two_hands_with_different_poses_do_not_pair() {
 }
 
 #[test]
+fn a_pose_freed_from_its_role_takes_ordinary_bindings() {
+    let mut config =
+        mudra_config::parse(mudra_config::DEFAULT_CONFIG_TOML, Path::new("d")).unwrap();
+    // L'armement passe au rock, le contrôle du volume est désactivé : la
+    // paume ouverte et le pincement redeviennent des poses ordinaires.
+    config.activation.wake_gesture = "rock".into();
+    config.bindings.retain(|b| b.gesture != "rock");
+    let volume = config
+        .continuous
+        .iter()
+        .position(|c| c.enter_gesture == "pinch")
+        .unwrap();
+    config.continuous[volume].enabled = false;
+    for gesture in ["open_palm", "pinch"] {
+        let mut binding = config.bindings[0].clone();
+        binding.gesture = gesture.into();
+        binding.hand = HandFilter::Any;
+        binding.repeat_ms = None;
+        config.bindings.push(binding);
+    }
+    let mut rig = Rig::new(config);
+    assert!(rig.hold("open_palm", 0.97, 900).is_empty());
+    assert_eq!(rig.engine.state(), EngineState::Locked);
+    rig.hold("rock", 0.97, 700);
+    assert_eq!(rig.engine.state(), EngineState::Armed);
+    rig.hold("none", 1.0, 150);
+
+    let events = rig.hold("open_palm", 0.97, 600);
+    assert_eq!(fired(&events), vec![("open_palm".to_string(), false)]);
+    rig.hold("none", 1.0, 150);
+    let events = rig.hold("pinch", 0.97, 600);
+    assert_eq!(fired(&events), vec![("pinch".to_string(), false)]);
+    assert_eq!(rig.engine.state(), EngineState::Armed);
+}
+
+#[test]
 fn hand_filter_is_respected() {
     let mut config =
         mudra_config::parse(mudra_config::DEFAULT_CONFIG_TOML, Path::new("d")).unwrap();

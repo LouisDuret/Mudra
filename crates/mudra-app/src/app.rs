@@ -14,6 +14,7 @@ use crossbeam_channel::bounded;
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use mudra_actions::{ActionSender, Feedback};
+use mudra_config::edit::ConfigEdit;
 use mudra_config::{Config, Control, InternalOp, Level};
 use mudra_gestures::EngineState;
 use mudra_gestures::custom::CustomPose;
@@ -817,8 +818,8 @@ impl App {
             });
         if reserved {
             self.gestures.error = Some(
-                "Cette pose sert à l'activation ou à un contrôle continu : retire-la d'abord \
-                 de config.toml."
+                "Cette pose sert à l'activation ou à un contrôle continu : donne d'abord ce \
+                 rôle à une autre pose."
                     .into(),
             );
             return;
@@ -847,10 +848,14 @@ impl App {
         }
     }
 
-    /// Applique une modification de binding faite dans l'onglet « Gestes » :
-    /// écrit le fichier, puis recharge la configuration.
     fn edit_binding(&mut self, edit: mudra_config::edit::BindingEdit) {
-        match self.write_binding_edit(&edit) {
+        self.edit_config(ConfigEdit::Binding(edit));
+    }
+
+    /// Applique une modification faite dans l'onglet « Gestes » : écrit le
+    /// fichier, puis recharge la configuration.
+    fn edit_config(&mut self, edit: ConfigEdit) {
+        match self.write_edit(&edit) {
             Ok(previous) => {
                 self.undo_text = Some(previous);
                 self.gestures.can_undo = true;
@@ -863,16 +868,17 @@ impl App {
     }
 
     /// Renvoie le contenu du fichier avant la modification.
-    fn write_binding_edit(&self, edit: &mudra_config::edit::BindingEdit) -> Result<String, String> {
+    fn write_edit(&self, edit: &ConfigEdit) -> Result<String, String> {
         let path = &self.config_path;
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("lecture de {} : {e}", path.display()))?;
         // Les indices de l'interface sont ceux de la configuration chargée.
         let on_disk = mudra_config::parse(&text, path).map_err(|e| e.to_string())?;
-        if on_disk.bindings != self.config.bindings {
+        if on_disk.bindings != self.config.bindings || on_disk.continuous != self.config.continuous
+        {
             return Err("Le fichier de configuration a changé entre-temps : réessaie.".into());
         }
-        let updated = mudra_config::edit::apply_binding_edit(&text, edit)?;
+        let updated = mudra_config::edit::apply_edit(&text, edit)?;
         let config = mudra_config::parse(&updated, path).map_err(|e| e.to_string())?;
         let errors: Vec<String> = mudra_config::validate(&config, &self.known)
             .iter()
@@ -904,6 +910,10 @@ impl App {
     fn ui_action(&mut self, action: UiAction) {
         match action {
             UiAction::EditBinding(edit) => self.edit_binding(edit),
+            UiAction::EditActivation(edit) => self.edit_config(ConfigEdit::Activation(edit)),
+            UiAction::EditContinuous(index, edit) => {
+                self.edit_config(ConfigEdit::Continuous(index, edit));
+            }
             UiAction::UndoEdit => self.undo_edit(),
             UiAction::TestAction(action) => match &self.pipeline {
                 Some(pipeline) => pipeline.send(Command::TestAction(action)),
