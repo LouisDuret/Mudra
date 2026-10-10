@@ -18,6 +18,7 @@ use mudra_capture::{
 use mudra_config::{Action, Config, Control, InternalOp, MouseTarget, resolve_model_path};
 use mudra_dataset::{FrameRecord, SessionHeader, SessionKind, SessionWriter};
 use mudra_gestures::builtin::{BuiltinDynamicClassifier, BuiltinStaticClassifier};
+use mudra_gestures::custom::CustomStaticClassifier;
 use mudra_gestures::engine::Reason;
 use mudra_gestures::onnx::{OnnxDynamicClassifier, OnnxStaticClassifier};
 use mudra_gestures::stage::{GestureStage, HandInput, HandView};
@@ -73,6 +74,8 @@ pub enum Command {
     Reload(Arc<Config>),
     /// Fenêtre d'aperçu ouverte ou fermée (EF-72).
     SetPreview(bool),
+    /// Poses perso modifiées sur le disque : recharge les classifieurs.
+    ReloadClassifiers,
     Record(RecordRequest),
     CancelRecording,
     ResetMetrics,
@@ -253,9 +256,28 @@ impl Drop for Pipeline {
     }
 }
 
-/// Charge les classifieurs configurés ; à défaut de fichier ONNX, les
-/// classifieurs géométriques intégrés prennent le relais.
+/// Charge les classifieurs configurés, complétés par les poses perso.
 pub fn load_classifiers(
+    config: &Config,
+) -> (
+    Box<dyn StaticClassifier>,
+    Box<dyn DynamicClassifier>,
+    Vec<String>,
+) {
+    let (static_classifier, dynamic_classifier, mut notices) = load_base_classifiers(config);
+    let (poses, custom_notices) = mudra_gestures::custom::load_dir(&crate::custom::dir());
+    notices.extend(custom_notices);
+    let static_classifier: Box<dyn StaticClassifier> = if poses.is_empty() {
+        static_classifier
+    } else {
+        Box::new(CustomStaticClassifier::new(static_classifier, &poses))
+    };
+    (static_classifier, dynamic_classifier, notices)
+}
+
+/// Charge les classifieurs de base ; à défaut de fichier ONNX, les
+/// classifieurs géométriques intégrés prennent le relais.
+pub fn load_base_classifiers(
     config: &Config,
 ) -> (
     Box<dyn StaticClassifier>,
@@ -506,6 +528,11 @@ impl Worker {
         }
     }
 
+    /// Aucune action n'est exécutée en mode essai ni pendant un enregistrement.
+    fn silent(&self) -> bool {
+        self.dry_run || self.recorder.is_some()
+    }
+
     fn emit(&self, event: PipelineEvent) {
         if self.events.try_send(event).is_ok()
             && let Some(notify) = &self.notify
@@ -643,6 +670,22 @@ impl Worker {
                 if !open && let Ok(mut slot) = self.shared.preview.lock() {
                     *slot = None;
                 }
+            }
+            Command::ReloadClassifiers => {
+                let (static_classifier, dynamic_classifier, notices) =
+                    load_classifiers(&self.config);
+                for notice in notices {
+                    tracing::info!("{notice}");
+                }
+                self.engine_events.clear();
+                self.stage.set_classifiers(
+                    &self.config,
+                    static_classifier,
+                    dynamic_classifier,
+                    &mut self.engine_events,
+                );
+                self.dispatch(now_us());
+                self.publish_status(true);
             }
             Command::Record(request) => self.start_recording(request),
             Command::CancelRecording => self.cancel_recording("annulé"),
@@ -842,6 +885,8 @@ impl Worker {
                     );
                     let summary = if self.dry_run {
                         format!("{summary} (essai, non exécutée)")
+                    } else if self.recorder.is_some() {
+                        format!("{summary} (enregistrement en cours, non exécutée)")
                     } else {
                         self.run_action(action, gesture);
                         summary
@@ -864,7 +909,7 @@ impl Worker {
                         continue;
                     };
                     if matches!(c.control, Control::Volume { .. })
-                        && !self.dry_run
+                        && !self.silent()
                         && let Some(actions) = &self.actions
                     {
                         actions.submit(ActionRequest::VolumeBegin);
@@ -880,7 +925,7 @@ impl Worker {
                     else {
                         continue;
                     };
-                    if self.dry_run {
+                    if self.silent() {
                         continue;
                     }
                     let target = match &c.control {

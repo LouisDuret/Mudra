@@ -6,6 +6,7 @@ pub mod gestures;
 pub mod overlay;
 pub mod preview;
 pub mod theme;
+pub mod trainer;
 
 use std::num::NonZeroU32;
 use std::sync::Arc;

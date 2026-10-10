@@ -16,6 +16,7 @@ use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use mudra_actions::{ActionSender, Feedback};
 use mudra_config::{Config, Control, InternalOp, Level};
 use mudra_gestures::EngineState;
+use mudra_gestures::custom::CustomPose;
 use mudra_gestures::engine::Reason;
 use notify::{RecursiveMode, Watcher};
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
@@ -90,7 +91,7 @@ impl Tray {
         let status_item = MenuItem::new("Mudra", false, None);
         let pause_item = MenuItem::new("Mettre en pause", true, None);
         let preview = MenuItem::new("Ouvrir l'aperçu", true, None);
-        let record = MenuItem::new("Enregistrer un geste…", true, None);
+        let record = MenuItem::new("Gestes et actions…", true, None);
         let reload = MenuItem::new("Recharger la configuration", true, None);
         let config_dir = MenuItem::new("Ouvrir le dossier de configuration", true, None);
         let logs = MenuItem::new("Ouvrir les journaux", true, None);
@@ -202,6 +203,8 @@ struct App {
     halo_wanted: bool,
     log: VecDeque<LogEntry>,
     record: RecordForm,
+    /// Poses personnalisées chargées, pour l'onglet « Gestes ».
+    custom: Vec<CustomPose>,
     /// Gestes des classifieurs chargés, pour l'onglet « Gestes ».
     known: mudra_config::KnownGestures,
     tab: Tab,
@@ -315,6 +318,7 @@ pub fn run(config_path: PathBuf, explicit: bool, options: RunOptions) -> Result<
         halo_wanted: false,
         log: VecDeque::with_capacity(128),
         record: RecordForm::default(),
+        custom: Vec::new(),
         known,
         tab: Tab::default(),
         gestures: GesturesState::default(),
@@ -374,6 +378,7 @@ impl App {
         if let Err(e) = platform::set_autostart(self.config.general.autostart) {
             tracing::warn!(erreur = %e, "lancement à l'ouverture de session");
         }
+        self.load_custom();
         self.start_pipeline();
         if let Some(message) = self.startup_notice.take() {
             self.notice(message, true);
@@ -691,6 +696,7 @@ impl App {
             pipeline_error: self.pipeline_error.as_deref(),
             record: &mut self.record,
             known: &self.known,
+            custom: &self.custom,
             tab: &mut self.tab,
             gestures: &mut self.gestures,
         };
@@ -715,6 +721,124 @@ impl App {
         overlay
             .window
             .paint(theme::PANEL, |ui| overlay::draw(ui, &model));
+    }
+
+    // ----- Poses personnalisées -----
+
+    /// Relit les poses perso du disque et donne leurs noms à l'interface.
+    fn load_custom(&mut self) {
+        let (poses, notices) = mudra_gestures::custom::load_dir(&crate::custom::dir());
+        for notice in notices {
+            self.log(LogKind::Error, notice);
+        }
+        theme::set_custom_names(poses.iter().map(|p| (p.label.as_str(), p.name.as_str())));
+        self.custom = poses;
+    }
+
+    /// Après une modification des poses perso : les classifieurs et la liste
+    /// des gestes connus suivent, sans redémarrer la caméra.
+    fn reload_custom(&mut self) {
+        self.load_custom();
+        self.known = crate::cli::known_gestures(&self.config).0;
+        self.gestures.sensitivity = None;
+        if let Some(pipeline) = &self.pipeline {
+            pipeline.send(Command::ReloadClassifiers);
+        }
+    }
+
+    fn train_take(&mut self, label: String) {
+        let Some(pipeline) = &self.pipeline else {
+            if let Some(trainer) = &mut self.gestures.trainer {
+                trainer.error = Some("Mudra n'est pas démarré.".into());
+            }
+            return;
+        };
+        self.record.active = true;
+        self.record.progress = None;
+        self.record.status = Some(("Prépare-toi…".into(), false));
+        pipeline.send(Command::Record(RecordRequest {
+            label,
+            kind: RecordKind::Static {
+                seconds: crate::custom::TAKE_SECONDS,
+            },
+            dataset_root: crate::custom::dataset_root(),
+        }));
+    }
+
+    fn train_finish(&mut self, label: String, name: Option<String>) {
+        let created = name.is_some();
+        let trained =
+            crate::custom::train_in(&crate::custom::dir(), &label, name.as_deref(), &self.config);
+        match trained {
+            Ok(pose) => {
+                self.gestures.trainer = None;
+                self.reload_custom();
+                self.log(
+                    LogKind::Info,
+                    format!(
+                        "Pose « {} » apprise sur {} exemples",
+                        pose.name,
+                        pose.examples.len()
+                    ),
+                );
+                if created {
+                    // Une pose sans action ne sert à rien : le formulaire s'ouvre.
+                    self.gestures.open_new_binding(&label, true, false);
+                }
+            }
+            Err(e) => match &mut self.gestures.trainer {
+                Some(trainer) => trainer.error = Some(e),
+                None => self.notice(e, true),
+            },
+        }
+    }
+
+    fn edit_pose(&mut self, label: &str, edit: impl FnOnce(&mut CustomPose)) {
+        match crate::custom::update_in(&crate::custom::dir(), label, edit) {
+            Ok(()) => self.reload_custom(),
+            Err(e) => self.gestures.error = Some(e),
+        }
+    }
+
+    /// Supprime une pose perso, ses prises et les actions qui l'utilisent.
+    fn delete_pose(&mut self, label: &str) {
+        let activation = &self.config.activation;
+        let reserved = activation.wake_gesture == label
+            || activation.lock_gesture == label
+            || self.config.continuous.iter().any(|c| {
+                c.enter_gesture == label
+                    || matches!(&c.control, Control::Mouse { click: Some(click), .. } if click == label)
+            });
+        if reserved {
+            self.gestures.error = Some(
+                "Cette pose sert à l'activation ou à un contrôle continu : retire-la d'abord \
+                 de config.toml."
+                    .into(),
+            );
+            return;
+        }
+        self.gestures.error = None;
+        // Du dernier au premier : les indices restants ne bougent pas.
+        let indices: Vec<usize> = (0..self.config.bindings.len())
+            .rev()
+            .filter(|i| self.config.bindings[*i].gesture == label)
+            .collect();
+        for index in indices {
+            self.edit_binding(mudra_config::edit::BindingEdit::Remove(index));
+            if self.gestures.error.is_some() {
+                return;
+            }
+        }
+        // Rétablir ces actions sans la pose donnerait une configuration invalide.
+        self.undo_text = None;
+        self.gestures.can_undo = false;
+        match crate::custom::delete_in(&crate::custom::dir(), label) {
+            Ok(()) => {
+                self.reload_custom();
+                self.log(LogKind::Info, format!("Pose « {label} » supprimée"));
+            }
+            Err(e) => self.gestures.error = Some(e),
+        }
     }
 
     /// Applique une modification de binding faite dans l'onglet « Gestes » :
@@ -800,27 +924,14 @@ impl App {
                     pipeline.send(Command::Lock);
                 }
             }
-            UiAction::StartRecording => {
-                let kind = if self.record.dynamic {
-                    RecordKind::Dynamic {
-                        reps: self.record.reps,
-                    }
-                } else {
-                    RecordKind::Static {
-                        seconds: self.record.seconds as f32,
-                    }
-                };
-                let request = RecordRequest {
-                    label: self.record.label.trim().to_string(),
-                    kind,
-                    dataset_root: dataset_root(),
-                };
-                if let Some(pipeline) = &self.pipeline {
-                    self.record.active = true;
-                    self.record.status = Some(("Prépare-toi…".into(), false));
-                    pipeline.send(Command::Record(request));
-                }
+            UiAction::TrainTake { label } => self.train_take(label),
+            UiAction::TrainFinish { label, name } => self.train_finish(label, name),
+            UiAction::DiscardTakes(files) => crate::custom::discard_takes(&files),
+            UiAction::SetPoseSensitivity { label, value } => {
+                self.edit_pose(&label, |pose| pose.sensitivity = value);
             }
+            UiAction::RenamePose { label, name } => self.edit_pose(&label, |pose| pose.name = name),
+            UiAction::DeletePose(label) => self.delete_pose(&label),
             UiAction::CancelRecording => {
                 if let Some(pipeline) = &self.pipeline {
                     pipeline.send(Command::CancelRecording);
@@ -1027,43 +1138,48 @@ impl App {
     fn on_record_event(&mut self, event: RecordEvent) {
         let form = &mut self.record;
         match event {
-            RecordEvent::Countdown { seconds_left, clip } => {
+            RecordEvent::Countdown { seconds_left, .. } => {
                 form.banner = Some((seconds_left.to_string(), Instant::now()));
-                form.status = Some((
-                    match clip {
-                        Some((n, total)) => format!("Répétition {n}/{total} dans {seconds_left}…"),
-                        None => format!("Début dans {seconds_left}…"),
-                    },
-                    false,
-                ));
+                form.progress = Some(0.0);
+                form.status = Some((format!("Début dans {seconds_left}…"), false));
             }
-            RecordEvent::Go { clip } => {
+            RecordEvent::Go { .. } => {
                 form.banner = Some(("⏺".into(), Instant::now()));
-                form.status = Some((
-                    match clip {
-                        Some((n, total)) => format!("Répétition {n}/{total} : maintenant !"),
-                        None => "Enregistrement… varie légèrement position et orientation.".into(),
-                    },
-                    false,
-                ));
+                form.status = Some(("Tiens la pose…".into(), false));
             }
-            RecordEvent::Progress { frames, fraction } => {
-                form.status = Some((
-                    format!("{:.0} % · {frames} trames", fraction * 100.0),
-                    false,
-                ));
+            RecordEvent::Progress { fraction, .. } => {
+                form.progress = Some(fraction);
             }
             RecordEvent::Done { path, frames } => {
                 form.active = false;
                 form.banner = None;
-                let text = format!("{frames} trames enregistrées dans {}", path.display());
-                form.status = Some((text.clone(), false));
-                self.log(LogKind::Info, text);
+                form.progress = None;
+                form.status = None;
+                let Some(trainer) = &mut self.gestures.trainer else {
+                    return;
+                };
+                if (frames as usize) < mudra_gestures::custom::MIN_TAKE_FRAMES {
+                    crate::custom::discard_takes(&[path]);
+                    trainer.error = Some(
+                        "La main n'a presque pas été vue pendant cette prise : elle n'est pas \
+                         gardée. Place ta main dans le cadre et recommence."
+                            .into(),
+                    );
+                } else {
+                    trainer.takes.push(path);
+                }
             }
             RecordEvent::Failed(message) => {
                 form.active = false;
                 form.banner = None;
-                form.status = Some((message.clone(), true));
+                form.progress = None;
+                form.status = None;
+                // Une prise arrêtée à la main n'est pas une erreur à afficher.
+                if !message.contains("(annulé)")
+                    && let Some(trainer) = &mut self.gestures.trainer
+                {
+                    trainer.error = Some(message.clone());
+                }
                 self.log(LogKind::Error, message);
             }
         }
@@ -1108,6 +1224,9 @@ impl App {
         if *id == tray.pause {
             self.toggle_pause();
         } else if *id == tray.preview || *id == tray.record {
+            if *id == tray.record {
+                self.tab = Tab::Gestures;
+            }
             self.open_preview(event_loop);
         } else if *id == tray.reload {
             self.reload_config(true);
@@ -1124,25 +1243,6 @@ impl App {
             event_loop.exit();
         }
     }
-}
-
-/// Dossier du dataset : `dataset/` à la racine du dépôt quand Mudra est lancé
-/// depuis celui-ci, sinon à côté de la configuration.
-fn dataset_root() -> PathBuf {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    if cwd.join("training").is_dir() || cwd.join("dataset").is_dir() {
-        return cwd.join("dataset");
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        for dir in exe.ancestors().skip(1).take(4) {
-            if dir.join("training").is_dir() {
-                return dir.join("dataset");
-            }
-        }
-    }
-    mudra_config::config_dir()
-        .map(|d| d.join("dataset"))
-        .unwrap_or_else(|_| cwd.join("dataset"))
 }
 
 impl ApplicationHandler<UserEvent> for App {

@@ -5,6 +5,7 @@
 //! (D-12), testable par rejeu.
 
 pub mod builtin;
+pub mod custom;
 pub mod engine;
 pub mod geometry;
 pub mod one_euro;

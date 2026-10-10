@@ -143,11 +143,38 @@ Actions disponibles : `launch`, `volume`, `media`, `keys`, `screenshot`, `snip`,
 
 ## Ajouter ton propre geste
 
+### Une pose à toi, depuis l'application
+
+Dans l'onglet **Gestes**, le bouton **+ Nouvelle pose** apprend à Mudra une
+forme de main qui t'appartient :
+
+1. donne-lui un nom (« Téléphone ») ;
+2. fais trois prises de quatre secondes, guidées par un compte à rebours, en
+   reformant la pose et en l'inclinant un peu d'une prise à l'autre. La caméra
+   s'affiche en vignette pour vérifier que ta main est bien suivie ;
+3. **Créer la pose** : elle rejoint la liste et le formulaire d'action s'ouvre.
+
+La pose s'ajoute aux gestes existants, sans Python ni ré-entraînement : Mudra
+compare ta main aux exemples enregistrés, et le seuil de reconnaissance se
+règle seul sur l'écart entre tes prises. Elle vaut pour les deux mains. Sur sa
+carte, une jauge montre la reconnaissance en direct ; tu peux régler la
+**sensibilité** (stricte ↔ tolérante), **ajouter des exemples** si elle est mal
+reconnue, la renommer ou la supprimer. Si elle ressemble trop à un geste
+existant, la carte le signale.
+
+Les poses vivent dans `%APPDATA%\Mudra\gestures\` : un fichier `.json` par
+pose et ses prises dans `dataset\`, au format de `mudra record`. Seuls les
+points-clés sont stockés, jamais d'images. Les mouvements ne s'apprennent pas
+encore de cette façon.
+
+### Ré-entraîner les classifieurs (avancé)
+
 Tant que `models/static_gestures.onnx` et `models/dynamic_gestures.onnx`
 n'existent pas, Mudra utilise des **classifieurs géométriques intégrés** (règles
-sur les points-clés), qui connaissent les gestes ci-dessus. Pour tes propres
-gestes, ou pour une reconnaissance calée sur ta main, entraîne les classifieurs
-sur tes données. Mets d'abord Mudra en pause (la caméra ne se partage pas).
+sur les points-clés), qui connaissent les gestes ci-dessus. Pour un mouvement à
+toi, ou pour une reconnaissance entièrement calée sur ta main, entraîne les
+classifieurs sur tes données. Mets d'abord Mudra en pause (la caméra ne se
+partage pas).
 
 ```powershell
 # 1. Enregistrer (3 sessions par geste, à des moments différents)
@@ -163,13 +190,13 @@ uv run mudra-train all
 mudra replay dataset\static\thumbs_up\<session>.jsonl
 ```
 
-L'enregistrement se fait aussi depuis l'aperçu (carte « Enregistrer un geste »).
 Seuls les points-clés sont stockés (`dataset/`), jamais d'images. L'application
 recharge les modèles dès que les `.onnx` changent. Les classes viennent des
 métadonnées du modèle : un geste de la configuration inconnu du modèle est une
 erreur explicite. Avec des modèles entraînés, **seuls les gestes que tu as
 enregistrés existent** : enregistre aussi ceux de la configuration par défaut
-que tu veux garder, à commencer par `open_palm` et `fist`.
+que tu veux garder, à commencer par `open_palm` et `fist`. Les poses apprises
+depuis l'application, elles, restent disponibles.
 
 ## Dépannage
 
@@ -193,7 +220,7 @@ crates/
   mudra-app/        binaire : CLI, zone de notification, aperçu, overlay, pipeline
   mudra-capture/    Media Foundation, boîte aux lettres « dernière trame gagne »
   mudra-vision/     décodage MJPEG, recadrage affine, paume, points-clés, suivi
-  mudra-gestures/   One Euro, classifieurs (intégrés et ONNX), moteur de gestes
+  mudra-gestures/   One Euro, classifieurs (intégrés, ONNX, poses perso), moteur de gestes
   mudra-actions/    volume, SendInput, lancement, capture d'écran
   mudra-config/     schéma TOML, validation, raccourcis
   mudra-dataset/    format JSONL des sessions enregistrées

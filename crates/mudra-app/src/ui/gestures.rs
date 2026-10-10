@@ -12,8 +12,11 @@ use mudra_config::{
     VolumeMode, VolumeOp,
 };
 
-use super::preview::{PreviewModel, UiAction};
+use mudra_gestures::custom::{CustomPose, SENSITIVITY_RANGE};
+
+use super::preview::{CameraView, PreviewModel, UiAction, probability_bar};
 use super::theme::{self, ACCENT, AMBER, BORDER, CARD, CARD_HOVER, GREEN, MUTED, RED};
+use super::trainer::{self, Trainer};
 use crate::pipeline::Status;
 
 /// Durée de la mise en évidence d'un binding qui vient de se déclencher.
@@ -29,6 +32,43 @@ pub struct GesturesState {
     /// Dernier binding déclenché, pour le retour visuel.
     pub flash: Option<(usize, Instant)>,
     pub can_undo: bool,
+    /// Apprentissage d'une pose perso en cours.
+    pub trainer: Option<Trainer>,
+    /// Réglage de sensibilité en cours de glissement : (label, valeur).
+    pub sensitivity: Option<(String, f32)>,
+    /// Renommage en cours : (label, nouveau nom).
+    pub renaming: Option<(String, String)>,
+    /// Pose dont la suppression attend une confirmation.
+    pub confirm_delete: Option<String>,
+}
+
+impl GesturesState {
+    /// Ouvre le formulaire d'une nouvelle action pour ce geste.
+    pub fn open_new_binding(&mut self, gesture: &str, is_static: bool, both_only: bool) {
+        self.error = None;
+        self.editor = Some(Editor {
+            target: None,
+            is_static,
+            both_only,
+            draft: Binding {
+                gesture: gesture.to_string(),
+                enabled: true,
+                hand: if both_only {
+                    HandFilter::Both
+                } else {
+                    HandFilter::Any
+                },
+                hold_ms: None,
+                cooldown_ms: None,
+                repeat_ms: None,
+                static_enter: None,
+                static_exit: None,
+                dynamic_threshold: None,
+                action: Kind::Keys.default_action(),
+            },
+            capturing: false,
+        });
+    }
 }
 
 /// Formulaire d'un binding en cours de création ou de modification.
@@ -575,6 +615,170 @@ struct Section<'a> {
     hint: &'a str,
     labels: &'a [String],
     is_static: bool,
+    /// Poses perso de la section, avec leurs réglages.
+    custom: &'a [CustomPose],
+}
+
+/// Nombre d'actions qui utilisent ce geste dans la configuration.
+fn uses(config: &Config, gesture: &str) -> usize {
+    config
+        .bindings
+        .iter()
+        .filter(|b| b.gesture == gesture)
+        .count()
+}
+
+/// Réglages d'une pose perso : reconnaissance en direct, sensibilité,
+/// exemples, nom, suppression.
+fn custom_controls(
+    ui: &mut Ui,
+    pose: &CustomPose,
+    config: &Config,
+    status: &Status,
+    state: &mut GesturesState,
+    actions: &mut Vec<UiAction>,
+) {
+    let label = pose.label.as_str();
+    let live = status
+        .hands
+        .iter()
+        .flat_map(|h| h.top_static.iter())
+        .filter(|(l, _)| l == label)
+        .map(|(_, p)| *p)
+        .fold(0.0, f32::max);
+    ui.horizontal(|ui| {
+        ui.allocate_ui(egui::Vec2::new(300.0, 20.0), |ui| {
+            probability_bar(
+                ui,
+                "Reconnaissance en direct",
+                live,
+                GREEN,
+                Some(config.defaults.static_enter),
+            );
+        });
+        ui.label(
+            RichText::new(format!(
+                "{} exemples · {} prises",
+                pose.examples.len(),
+                pose.takes
+            ))
+            .small()
+            .color(MUTED),
+        );
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Sensibilité").color(MUTED));
+        ui.label(RichText::new("stricte").small().color(MUTED));
+        let mut value = state
+            .sensitivity
+            .as_ref()
+            .filter(|(l, _)| l == label)
+            .map_or(pose.sensitivity, |(_, v)| *v);
+        // Le rail d'un curseur a par défaut la couleur de la carte : on le
+        // rend visible, avec la partie parcourue en couleur d'accent.
+        let slider = ui
+            .scope(|ui| {
+                ui.visuals_mut().widgets.inactive.bg_fill = BORDER;
+                ui.visuals_mut().selection.bg_fill = ACCENT.gamma_multiply(0.7);
+                ui.add(
+                    egui::Slider::new(&mut value, SENSITIVITY_RANGE.0..=SENSITIVITY_RANGE.1)
+                        .show_value(false)
+                        .trailing_fill(true),
+                )
+            })
+            .inner
+            .on_hover_text(
+                "Stricte : la pose doit être refaite fidèlement. Tolérante : elle est \
+                 reconnue plus facilement, au risque de se déclencher à tort.",
+            );
+        ui.label(RichText::new("tolérante").small().color(MUTED));
+        if slider.changed() {
+            state.sensitivity = Some((label.to_string(), value));
+        }
+        // Écrit une fois le curseur relâché, pas à chaque pixel.
+        if (slider.drag_stopped() || (slider.changed() && !slider.dragged()))
+            && (value - pose.sensitivity).abs() > 1e-3
+        {
+            actions.push(UiAction::SetPoseSensitivity {
+                label: label.to_string(),
+                value,
+            });
+        }
+
+        if ui
+            .add_enabled(
+                state.trainer.is_none(),
+                egui::Button::new("Ajouter des exemples"),
+            )
+            .on_hover_text("Une prise de plus, pour une pose mal reconnue.")
+            .clicked()
+        {
+            state.trainer = Some(Trainer::more_examples(label, &pose.name));
+        }
+        if ui.button("Renommer").clicked() {
+            state.renaming = Some((label.to_string(), pose.name.clone()));
+        }
+        if ui.button("Supprimer la pose").clicked() {
+            state.confirm_delete = Some(label.to_string());
+        }
+    });
+    if let Some((target, name)) = &mut state.renaming
+        && target == label
+    {
+        let mut close = false;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Nouveau nom").color(MUTED));
+            ui.add(egui::TextEdit::singleline(name).desired_width(220.0));
+            let valid = !name.trim().is_empty();
+            if ui
+                .add_enabled(valid, egui::Button::new("Valider"))
+                .clicked()
+            {
+                actions.push(UiAction::RenamePose {
+                    label: label.to_string(),
+                    name: name.trim().to_string(),
+                });
+                close = true;
+            }
+            if ui.button("Annuler").clicked() {
+                close = true;
+            }
+        });
+        if close {
+            state.renaming = None;
+        }
+    }
+    if state.confirm_delete.as_deref() == Some(label) {
+        ui.horizontal_wrapped(|ui| {
+            let text = match uses(config, label) {
+                0 => "Supprimer cette pose et ses exemples ?".to_string(),
+                1 => "Supprimer cette pose, ses exemples et son action ?".to_string(),
+                n => format!("Supprimer cette pose, ses exemples et ses {n} actions ?"),
+            };
+            ui.label(RichText::new(text).color(AMBER));
+            if ui.button("Supprimer définitivement").clicked() {
+                actions.push(UiAction::DeletePose(label.to_string()));
+                state.confirm_delete = None;
+                state.editor = None;
+            }
+            if ui.button("Garder").clicked() {
+                state.confirm_delete = None;
+            }
+        });
+    }
+    for resemblance in &pose.resemblances {
+        ui.label(
+            RichText::new(format!(
+                "Ressemble à « {} » ({:.0} % des images des prises). Quand les deux se \
+                 confondent, c'est cette pose perso qui l'emporte : resserre la \
+                 sensibilité ou choisis une pose plus distincte.",
+                theme::gesture_name(&resemblance.label),
+                resemblance.share * 100.0
+            ))
+            .small()
+            .color(AMBER),
+        );
+    }
 }
 
 fn gesture_card(
@@ -586,6 +790,7 @@ fn gesture_card(
     state: &mut GesturesState,
     actions: &mut Vec<UiAction>,
 ) {
+    let custom = section.custom.iter().find(|p| p.label == gesture);
     let role = section
         .is_static
         .then(|| reserved_role(config, gesture))
@@ -594,6 +799,9 @@ fn gesture_card(
     framed(ui, CARD, |ui| {
         ui.horizontal(|ui| {
             ui.label(RichText::new(theme::gesture_name(gesture)).strong());
+            if custom.is_some() {
+                ui.label(RichText::new("perso").small().color(ACCENT));
+            }
             if let Some(p) = live {
                 ui.label(
                     RichText::new(format!("détecté · {:.0} %", p * 100.0))
@@ -611,32 +819,13 @@ fn gesture_card(
                     "+ Associer une action"
                 };
                 if ui.button(label).clicked() {
-                    state.error = None;
-                    state.editor = Some(Editor {
-                        target: None,
-                        is_static: section.is_static,
-                        both_only: role.is_some(),
-                        draft: Binding {
-                            gesture: gesture.to_string(),
-                            enabled: true,
-                            hand: if role.is_some() {
-                                HandFilter::Both
-                            } else {
-                                HandFilter::Any
-                            },
-                            hold_ms: None,
-                            cooldown_ms: None,
-                            repeat_ms: None,
-                            static_enter: None,
-                            static_exit: None,
-                            dynamic_threshold: None,
-                            action: Kind::Keys.default_action(),
-                        },
-                        capturing: false,
-                    });
+                    state.open_new_binding(gesture, section.is_static, role.is_some());
                 }
             });
         });
+        if let Some(pose) = custom {
+            custom_controls(ui, pose, config, status, state, actions);
+        }
 
         let mut any = false;
         for (index, binding) in config.bindings.iter().enumerate() {
@@ -771,6 +960,16 @@ pub fn draw(ui: &mut Ui, model: &mut PreviewModel<'_>, actions: &mut Vec<UiActio
     let config: &Config = model.config;
     let status: &Status = model.status;
     let known: &KnownGestures = model.known;
+    let custom: &[CustomPose] = model.custom;
+    let record = &*model.record;
+    let camera = CameraView {
+        status,
+        config,
+        frame: model.frame,
+        texture: model.texture,
+        pipeline_error: model.pipeline_error,
+        banner: record.banner.as_ref(),
+    };
     let state: &mut GesturesState = model.gestures;
 
     egui::ScrollArea::vertical()
@@ -827,12 +1026,14 @@ pub fn draw(ui: &mut Ui, model: &mut PreviewModel<'_>, actions: &mut Vec<UiActio
                     hint: "Une forme de main tenue un instant.",
                     labels: &known.static_,
                     is_static: true,
+                    custom,
                 },
                 Section {
                     title: "MOUVEMENTS",
                     hint: "Un geste bref de la main.",
                     labels: &known.dynamic,
                     is_static: false,
+                    custom: &[],
                 },
             ];
             for section in &sections {
@@ -840,8 +1041,42 @@ pub fn draw(ui: &mut Ui, model: &mut PreviewModel<'_>, actions: &mut Vec<UiActio
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(section.title).small().color(ACCENT).strong());
                     ui.label(RichText::new(section.hint).small().color(MUTED));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if section.is_static {
+                            if ui
+                                .add_enabled(
+                                    state.trainer.is_none(),
+                                    egui::Button::new("+ Nouvelle pose"),
+                                )
+                                .on_hover_text(
+                                    "Apprends à Mudra une pose à toi, en trois courtes prises.",
+                                )
+                                .clicked()
+                            {
+                                state.trainer = Some(Trainer::new_pose());
+                            }
+                        } else {
+                            ui.add_enabled(false, egui::Button::new("+ Nouveau mouvement"))
+                                .on_disabled_hover_text(
+                                    "À venir : seules les poses s'apprennent pour l'instant.",
+                                );
+                        }
+                    });
                 });
-                for gesture in section.labels.iter().filter(|g| g.as_str() != "none") {
+                if section.is_static
+                    && let Some(mut session) = state.trainer.take()
+                    && trainer::draw(ui, &mut session, &camera, record, known, actions)
+                {
+                    state.trainer = Some(session);
+                }
+                // Les poses perso d'abord : ce sont celles qu'on règle.
+                let is_custom = |g: &&String| section.custom.iter().any(|p| &p.label == *g);
+                let gestures = section.labels.iter().filter(|g| g.as_str() != "none");
+                for gesture in gestures
+                    .clone()
+                    .filter(is_custom)
+                    .chain(gestures.filter(|g| !is_custom(g)))
+                {
                     gesture_card(ui, section, gesture, config, status, state, actions);
                 }
             }

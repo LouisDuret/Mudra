@@ -1,5 +1,7 @@
 //! Thème sombre de Mudra.
 
+use std::sync::Mutex;
+
 use egui::{Color32, CornerRadius, FontFamily, FontId, Stroke, TextStyle, Visuals};
 use mudra_gestures::EngineState;
 
@@ -112,6 +114,39 @@ pub fn gesture_name(id: &str) -> &str {
         "swipe_down" => "Balayage bas",
         "rotate_cw" => "Rotation horaire",
         "rotate_ccw" => "Rotation anti-horaire",
-        other => other,
+        other => CUSTOM_NAMES
+            .lock()
+            .ok()
+            .and_then(|names| {
+                names
+                    .iter()
+                    .find(|(label, _)| label == other)
+                    .map(|(_, n)| *n)
+            })
+            .unwrap_or(other),
     }
+}
+
+/// Noms affichés des poses perso. Ils sont lus de partout dans l'interface,
+/// d'où une table globale ; un nom reste alloué pour la durée du programme.
+static CUSTOM_NAMES: Mutex<Vec<(String, &'static str)>> = Mutex::new(Vec::new());
+
+/// Remplace la table des noms des poses perso (label, nom).
+pub fn set_custom_names<'a>(names: impl Iterator<Item = (&'a str, &'a str)>) {
+    let Ok(mut table) = CUSTOM_NAMES.lock() else {
+        return;
+    };
+    let next = names
+        .map(|(label, name)| {
+            let kept = table
+                .iter()
+                .find(|(l, n)| l == label && *n == name)
+                .map(|(_, n)| *n);
+            (
+                label.to_string(),
+                kept.unwrap_or_else(|| Box::leak(name.to_string().into_boxed_str())),
+            )
+        })
+        .collect();
+    *table = next;
 }

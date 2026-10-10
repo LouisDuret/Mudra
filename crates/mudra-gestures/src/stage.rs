@@ -139,6 +139,29 @@ impl GestureStage {
         );
     }
 
+    /// Remplace les classifieurs à chaud (poses perso ajoutées ou retirées).
+    /// Les labels peuvent changer : les pistes repartent de zéro.
+    pub fn set_classifiers(
+        &mut self,
+        config: &Config,
+        static_classifier: Box<dyn StaticClassifier>,
+        dynamic_classifier: Box<dyn DynamicClassifier>,
+        events: &mut Vec<EngineEvent>,
+    ) {
+        self.scratch = vec![
+            0.0;
+            static_classifier
+                .labels()
+                .len()
+                .max(dynamic_classifier.labels().len())
+        ];
+        self.resampled = Vec::with_capacity(dynamic_classifier.window_len());
+        self.static_classifier = static_classifier;
+        self.dynamic_classifier = dynamic_classifier;
+        self.slots.clear();
+        self.set_config(config, events);
+    }
+
     /// Oublie toutes les pistes (pause, reprise, changement de caméra).
     pub fn reset_tracks(&mut self) {
         self.slots.clear();

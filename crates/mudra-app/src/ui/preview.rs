@@ -1,8 +1,8 @@
 //! Fenêtre d'aperçu et de diagnostic (EF-71) : image caméra, points-clés et
-//! région d'intérêt, probabilités, état du moteur, performances, journal, et
-//! assistant d'enregistrement (EF-66).
+//! région d'intérêt, probabilités, état du moteur, performances et journal.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::time::Instant;
 
 use egui::{
@@ -13,6 +13,7 @@ use mudra_capture::CaptureState;
 use mudra_config::edit::BindingEdit;
 use mudra_config::{Action, Config, Control, KnownGestures};
 use mudra_gestures::EngineState;
+use mudra_gestures::custom::CustomPose;
 
 use super::gestures::GesturesState;
 use super::theme::{self, ACCENT, AMBER, BACKGROUND, BORDER, CARD, GREEN, MUTED, PANEL, RED, TEXT};
@@ -34,31 +35,17 @@ pub struct LogEntry {
 }
 
 /// État de l'assistant d'enregistrement.
+/// État de la prise en cours (onglet « Gestes »), alimenté par le pipeline.
+#[derive(Default)]
 pub struct RecordForm {
-    pub label: String,
-    pub dynamic: bool,
-    pub seconds: u32,
-    pub reps: u32,
     /// Enregistrement en cours.
     pub active: bool,
-    /// Dernier message (progression, fichier écrit, erreur).
+    /// Dernier message (progression, erreur).
     pub status: Option<(String, bool)>,
+    /// Avancement de la capture, entre 0 et 1.
+    pub progress: Option<f32>,
     /// Grand message affiché sur l'image : compte à rebours, signal de départ.
     pub banner: Option<(String, Instant)>,
-}
-
-impl Default for RecordForm {
-    fn default() -> Self {
-        Self {
-            label: "thumbs_up".into(),
-            dynamic: false,
-            seconds: 20,
-            reps: 15,
-            active: false,
-            status: None,
-            banner: None,
-        }
-    }
 }
 
 /// Onglet affiché dans la fenêtre.
@@ -76,9 +63,28 @@ pub enum UiAction {
     UndoEdit,
     TestAction(Action),
     SetDryRun(bool),
+    /// Enregistre une prise de la pose perso `label`.
+    TrainTake {
+        label: String,
+    },
+    /// Apprend la pose à partir de ses prises ; `name` pour une nouvelle pose.
+    TrainFinish {
+        label: String,
+        name: Option<String>,
+    },
+    /// Supprime des prises abandonnées.
+    DiscardTakes(Vec<PathBuf>),
+    SetPoseSensitivity {
+        label: String,
+        value: f32,
+    },
+    RenamePose {
+        label: String,
+        name: String,
+    },
+    DeletePose(String),
     TogglePause,
     Lock,
-    StartRecording,
     CancelRecording,
     ReloadConfig,
     OpenConfigFolder,
@@ -94,6 +100,8 @@ pub struct PreviewModel<'a> {
     pub pipeline_error: Option<&'a str>,
     pub record: &'a mut RecordForm,
     pub known: &'a KnownGestures,
+    /// Poses personnalisées chargées.
+    pub custom: &'a [CustomPose],
     pub tab: &'a mut Tab,
     pub gestures: &'a mut GesturesState,
 }
@@ -164,7 +172,13 @@ fn pill(ui: &mut Ui, text: &str, color: Color32) {
 }
 
 /// Barre de probabilité avec libellé et pourcentage.
-fn probability_bar(ui: &mut Ui, label: &str, p: f32, color: Color32, threshold: Option<f32>) {
+pub(super) fn probability_bar(
+    ui: &mut Ui,
+    label: &str,
+    p: f32,
+    color: Color32,
+    threshold: Option<f32>,
+) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 20.0), Sense::hover());
     let painter = ui.painter();
     painter.rect_filled(rect, CornerRadius::same(4), BACKGROUND);
@@ -446,69 +460,6 @@ fn performance_card(ui: &mut Ui, status: &Status) {
     });
 }
 
-fn record_card(ui: &mut Ui, model: &mut PreviewModel<'_>, actions: &mut Vec<UiAction>) {
-    let paused = model.status.state == EngineState::Paused;
-    let form = &mut *model.record;
-    card(ui, "Enregistrer un geste", |ui| {
-        ui.add_enabled_ui(!form.active, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Label").color(MUTED));
-                ui.add(
-                    egui::TextEdit::singleline(&mut form.label)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("snake_case"),
-                );
-            });
-            ui.horizontal(|ui| {
-                ui.radio_value(&mut form.dynamic, false, "Pose statique");
-                ui.radio_value(&mut form.dynamic, true, "Geste dynamique");
-            });
-            ui.horizontal(|ui| {
-                if form.dynamic {
-                    ui.label(RichText::new("Répétitions").color(MUTED));
-                    ui.add(egui::DragValue::new(&mut form.reps).range(1..=200));
-                } else {
-                    ui.label(RichText::new("Durée").color(MUTED));
-                    ui.add(
-                        egui::DragValue::new(&mut form.seconds)
-                            .range(3..=900)
-                            .suffix(" s"),
-                    );
-                }
-            });
-        });
-        let valid = mudra_dataset::validate_label(&form.label).is_ok();
-        ui.horizontal(|ui| {
-            if form.active {
-                if ui.button("Annuler").clicked() {
-                    actions.push(UiAction::CancelRecording);
-                }
-                ui.spinner();
-            } else if ui
-                .add_enabled(valid && !paused, egui::Button::new("⏺  Démarrer"))
-                .clicked()
-            {
-                actions.push(UiAction::StartRecording);
-            }
-            if !valid {
-                ui.label(
-                    RichText::new("minuscules, chiffres et _")
-                        .small()
-                        .color(AMBER),
-                );
-            }
-        });
-        if let Some((text, error)) = &form.status {
-            ui.label(wrapped(ui, text, if *error { RED } else { MUTED }));
-        }
-        ui.label(
-            RichText::new("Les points-clés vont dans dataset/ ; aucune image n'est enregistrée.")
-                .small()
-                .color(MUTED),
-        );
-    });
-}
-
 fn log_card(ui: &mut Ui, log: &VecDeque<LogEntry>) {
     card(ui, "Journal", |ui| {
         if log.is_empty() {
@@ -547,7 +498,19 @@ fn centered_message(ui: &Ui, rect: Rect, title: &str, detail: &str, color: Color
     );
 }
 
-fn camera_view(ui: &mut Ui, model: &PreviewModel<'_>) {
+/// Ce que l'image caméra affiche ; sert aussi à la vignette de l'onglet « Gestes ».
+pub(super) struct CameraView<'a> {
+    pub status: &'a Status,
+    pub config: &'a Config,
+    pub frame: Option<&'a PreviewFrame>,
+    pub texture: Option<&'a egui::TextureHandle>,
+    pub pipeline_error: Option<&'a str>,
+    /// Compte à rebours ou signal de départ d'une prise.
+    pub banner: Option<&'a (String, Instant)>,
+}
+
+/// Dessine la caméra et ses tracés dans toute la place disponible.
+pub(super) fn camera_view(ui: &mut Ui, model: &CameraView<'_>) {
     let available = ui.available_rect_before_wrap();
     ui.allocate_rect(available, Sense::hover());
     let painter = ui.painter_at(available);
@@ -674,16 +637,18 @@ fn camera_view(ui: &mut Ui, model: &PreviewModel<'_>) {
     }
 
     // Compte à rebours et signal de départ de l'enregistrement.
-    if let Some((text, since)) = &model.record.banner
+    if let Some((text, since)) = model.banner
         && since.elapsed().as_secs_f32() < 1.2
     {
-        let center = Pos2::new(rect.center().x, rect.top() + 70.0);
-        painter.circle_filled(center, 44.0, PANEL.gamma_multiply(0.85));
+        // Proportionné à l'image : la vignette de l'onglet « Gestes » est petite.
+        let radius = (rect.height() * 0.24).min(44.0);
+        let center = Pos2::new(rect.center().x, rect.top() + radius * 1.6);
+        painter.circle_filled(center, radius, PANEL.gamma_multiply(0.85));
         painter.text(
             center,
             Align2::CENTER_CENTER,
             text,
-            FontId::proportional(44.0),
+            FontId::proportional(radius),
             RED,
         );
     }
@@ -748,7 +713,6 @@ pub fn draw(ui: &mut Ui, model: &mut PreviewModel<'_>) -> Vec<UiAction> {
                         hand_card(ui, hand, model);
                     }
                     performance_card(ui, model.status);
-                    record_card(ui, model, &mut actions);
                     log_card(ui, model.log);
                     card(ui, "Configuration", |ui| {
                         ui.horizontal_wrapped(|ui| {
@@ -784,7 +748,19 @@ pub fn draw(ui: &mut Ui, model: &mut PreviewModel<'_>) -> Vec<UiAction> {
             top: 0,
             bottom: 10,
         }))
-        .show(ui, |ui| camera_view(ui, model));
+        .show(ui, |ui| {
+            camera_view(
+                ui,
+                &CameraView {
+                    status: model.status,
+                    config: model.config,
+                    frame: model.frame,
+                    texture: model.texture,
+                    pipeline_error: model.pipeline_error,
+                    banner: model.record.banner.as_ref(),
+                },
+            )
+        });
 
     actions
 }
