@@ -88,6 +88,8 @@ pub enum UiAction {
         name: String,
     },
     DeletePose(String),
+    /// Retire les exemples ajoutés à un geste de base.
+    RemoveExamples(String),
     TogglePause,
     Lock,
     CancelRecording,

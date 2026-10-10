@@ -779,14 +779,20 @@ impl App {
             Ok(pose) => {
                 self.gestures.trainer = None;
                 self.reload_custom();
-                self.log(
-                    LogKind::Info,
+                let message = if pose.extends_base {
+                    format!(
+                        "« {} » complété par {} exemples",
+                        theme::gesture_name(&label),
+                        pose.examples.len()
+                    )
+                } else {
                     format!(
                         "Pose « {} » apprise sur {} exemples",
                         pose.name,
                         pose.examples.len()
-                    ),
-                );
+                    )
+                };
+                self.log(LogKind::Info, message);
                 if created {
                     // Une pose sans action ne sert à rien : le formulaire s'ouvre.
                     let both_only = pose.two_hands.then_some(BothOnly::TwoHandPose);
@@ -843,6 +849,20 @@ impl App {
             Ok(()) => {
                 self.reload_custom();
                 self.log(LogKind::Info, format!("Pose « {label} » supprimée"));
+            }
+            Err(e) => self.gestures.error = Some(e),
+        }
+    }
+
+    /// Retire les exemples ajoutés à un geste de base : le geste, ses actions
+    /// et son rôle restent.
+    fn remove_examples(&mut self, label: &str) {
+        match crate::custom::delete_in(&crate::custom::dir(), label) {
+            Ok(()) => {
+                self.gestures.error = None;
+                self.reload_custom();
+                let name = theme::gesture_name(label);
+                self.log(LogKind::Info, format!("Exemples de « {name} » retirés"));
             }
             Err(e) => self.gestures.error = Some(e),
         }
@@ -952,6 +972,7 @@ impl App {
             }
             UiAction::RenamePose { label, name } => self.edit_pose(&label, |pose| pose.name = name),
             UiAction::DeletePose(label) => self.delete_pose(&label),
+            UiAction::RemoveExamples(label) => self.remove_examples(&label),
             UiAction::CancelRecording => {
                 if let Some(pipeline) = &self.pipeline {
                     pipeline.send(Command::CancelRecording);

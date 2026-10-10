@@ -1,6 +1,7 @@
 //! Apprentissage d'une pose personnalisée dans l'onglet « Gestes » : un nom,
 //! quelques prises guidées avec la caméra en vignette, puis la pose rejoint la
-//! liste des gestes.
+//! liste des gestes. La même séance ajoute des exemples à une pose existante
+//! ou à un geste de base.
 
 use std::path::PathBuf;
 
@@ -33,8 +34,14 @@ pub struct Trainer {
     pub name: String,
     /// La pose ne se fait qu'à deux mains ; figé à la première prise.
     pub two_hands: bool,
-    /// Pose existante à compléter (label) ; `None` pour une nouvelle pose.
+    /// Pose ou geste de base à compléter (label) ; `None` pour une nouvelle pose.
     pub existing: Option<String>,
+    /// Les exemples complètent un geste de base, pas une pose perso.
+    pub base: bool,
+    /// Nombre de prises demandées avant de pouvoir terminer.
+    needed: usize,
+    /// La séance vient de s'ouvrir : la page défile jusqu'à elle.
+    fresh: bool,
     /// Identifiant de la pose, figé à la première prise.
     pub label: Option<String>,
     /// Prises enregistrées pendant cette séance.
@@ -48,6 +55,9 @@ impl Trainer {
             name: String::new(),
             two_hands: false,
             existing: None,
+            base: false,
+            needed: TAKES_FOR_NEW_POSE,
+            fresh: true,
             label: None,
             takes: Vec::new(),
             error: None,
@@ -59,17 +69,22 @@ impl Trainer {
             name: name.to_string(),
             two_hands,
             existing: Some(label.to_string()),
+            base: false,
+            needed: 1,
+            fresh: true,
             label: Some(label.to_string()),
             takes: Vec::new(),
             error: None,
         }
     }
 
-    fn takes_needed(&self) -> usize {
-        if self.existing.is_some() {
-            1
-        } else {
-            TAKES_FOR_NEW_POSE
+    /// Exemples pour le geste de base `label`. Les premiers demandent autant
+    /// de prises qu'une nouvelle pose : c'est leur écart qui règle la tolérance.
+    pub fn base_examples(label: &str, name: &str, first: bool) -> Self {
+        Self {
+            base: true,
+            needed: if first { TAKES_FOR_NEW_POSE } else { 1 },
+            ..Self::more_examples(label, name, false)
         }
     }
 }
@@ -87,7 +102,10 @@ pub(super) fn draw(
     let recording = record.active;
     let paused = camera.status.state == EngineState::Paused || camera.pipeline_error.is_some();
     let done = trainer.takes.len();
-    let needed = trainer.takes_needed();
+    let needed = trainer.needed;
+    if std::mem::take(&mut trainer.fresh) {
+        ui.scroll_to_cursor(Some(Align::Min));
+    }
 
     // Tant qu'aucune prise n'est faite, l'identifiant suit le nom saisi.
     let label = trainer.label.clone().or_else(|| {
@@ -204,12 +222,24 @@ pub(super) fn draw(
                     } else {
                         INSTRUCTIONS
                     };
-                    let instruction = if done < needed || trainer.existing.is_some() {
+                    let instruction = if done < needed || needed == 1 {
                         instructions[done.min(instructions.len() - 1)]
+                    } else if trainer.base {
+                        "C'est assez pour compléter le geste. Une prise de plus le rend plus tolérant."
                     } else {
                         "C'est assez pour apprendre la pose. Une prise de plus la rend plus tolérante."
                     };
                     ui.label(instruction);
+                    if trainer.base {
+                        ui.label(
+                            RichText::new(
+                                "Fais le geste à ta façon, surtout là où Mudra le reconnaît mal : \
+                                 tes exemples s'ajoutent à ce qu'il reconnaît déjà.",
+                            )
+                            .small()
+                            .color(MUTED),
+                        );
+                    }
                     ui.add_space(4.0);
 
                     if recording {
@@ -254,7 +284,9 @@ pub(super) fn draw(
                                 }
                             }
                             if enough && let Some(label) = &label {
-                                let finish = if trainer.existing.is_some() {
+                                let finish = if trainer.base {
+                                    "Enregistrer mes exemples"
+                                } else if trainer.existing.is_some() {
                                     "Mettre à jour la pose"
                                 } else {
                                     "Créer la pose"

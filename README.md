@@ -182,10 +182,20 @@ jamais, et son action est toujours « Deux mains ». Deux choses à savoir :
 - les mains doivent rester distinctes à l'image : mains jointes ou doigts
   entrelacés ne sont pas suivis comme deux mains.
 
+Les gestes de base (paume ouverte, poing, V…) se complètent de la même façon :
+le bouton **Ajouter des exemples** de leur carte lance trois prises de ta
+façon de faire le geste. Tes exemples s'ajoutent à ce que Mudra reconnaît
+déjà : le geste passe là où il était manqué, et rien de ce qui était reconnu
+ne se perd. La carte gagne alors la jauge, la sensibilité, une prise de plus à
+la demande, et **Retirer mes exemples** pour revenir au geste d'origine, sans
+toucher à ses actions ni à son rôle. Des exemples ne rendent jamais un geste
+plus strict : contre un déclenchement à tort, c'est le geste voisin qu'il
+faut compléter, ou la sensibilité de tes exemples qu'il faut resserrer.
+
 Les poses vivent dans `%APPDATA%\Mudra\gestures\` : un fichier `.json` par
-pose et ses prises dans `dataset\`, au format de `mudra record`. Seuls les
-points-clés sont stockés, jamais d'images. Les mouvements ne s'apprennent pas
-encore de cette façon.
+pose (ou par geste de base complété) et ses prises dans `dataset\`, au format
+de `mudra record`. Seuls les points-clés sont stockés, jamais d'images. Les
+mouvements ne s'apprennent pas encore de cette façon.
 
 ### Ré-entraîner les classifieurs (avancé)
 

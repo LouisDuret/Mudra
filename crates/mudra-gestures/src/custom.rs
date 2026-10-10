@@ -9,6 +9,9 @@
 //! Une pose à deux mains est apprise de la même façon, sur la forme de chaque
 //! main et sur leur disposition l'une par rapport à l'autre. Elle n'existe
 //! que lorsque deux mains sont visibles.
+//!
+//! Les mêmes exemples peuvent compléter un geste du classifieur de base : ils
+//! le font reconnaître là où la base le manque, sans rien lui retirer.
 
 use std::path::{Path, PathBuf};
 
@@ -314,6 +317,10 @@ pub struct CustomPose {
     /// Pose qui ne se fait qu'à deux mains : ses exemples décrivent les deux.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub two_hands: bool,
+    /// Exemples ajoutés au geste `label` du classifieur de base : ils
+    /// alimentent ce geste au lieu de créer une pose.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub extends_base: bool,
     pub examples: Vec<Vec<f32>>,
 }
 
@@ -377,6 +384,7 @@ impl CustomPose {
             takes: takes.len() as u32,
             resemblances: Vec::new(),
             two_hands,
+            extends_base: false,
             examples: per_take
                 .into_iter()
                 .flatten()
@@ -422,7 +430,8 @@ impl CustomPose {
     }
 
     /// Mesure les ressemblances de la pose avec les gestes du classifieur de
-    /// base et avec les autres poses perso, sur les images des prises.
+    /// base et avec les autres poses perso, sur les images des prises. Des
+    /// exemples ajoutés à un geste de base ne se comparent pas à ce geste.
     pub fn find_resemblances(
         &mut self,
         samples: &[HandSample],
@@ -441,7 +450,7 @@ impl CustomPose {
         for sample in samples {
             if base.classify(sample, &mut probs).is_ok() {
                 let top = crate::argmax(&probs);
-                if labels[top] != NONE_LABEL && probs[top] >= enter {
+                if labels[top] != NONE_LABEL && labels[top] != self.label && probs[top] >= enter {
                     counts[top] += 1;
                 }
             }
@@ -464,11 +473,20 @@ impl CustomPose {
                 .filter(|s| matcher.confidence(&both_readings(&s.world)) >= enter)
                 .count();
             let share = hits as f32 / total;
-            if share >= RESEMBLANCE_SHARE {
-                self.resemblances.push(Resemblance {
+            if share < RESEMBLANCE_SHARE {
+                continue;
+            }
+            // Un geste de base et ses exemples ajoutés ne font qu'un.
+            match self
+                .resemblances
+                .iter_mut()
+                .find(|r| r.label == other.label)
+            {
+                Some(known) => known.share = known.share.max(share),
+                None => self.resemblances.push(Resemblance {
                     label: other.label.clone(),
                     share,
-                });
+                }),
             }
         }
     }
@@ -546,30 +564,31 @@ impl<F: Shape> Matcher<F> {
     }
 }
 
-/// La meilleure pose de `scores` prend sa confiance sur `out[..from]` ; les
-/// autres poses du groupe se partagent cette même masse, à partir de `from`.
-fn overlay(out: &mut [f32], from: usize, scores: &[f32]) {
+/// La meilleure pose de `scores` prend sa confiance sur tout `out` ; les poses
+/// du groupe se partagent cette même masse, chacune sur son label de `targets`.
+fn overlay(out: &mut [f32], scores: &[f32], targets: impl Iterator<Item = usize>) {
     let best = scores.iter().copied().fold(0.0, f32::max);
     let sharp_sum: f32 = scores.iter().map(|s| s.powi(4)).sum();
-    let (rest, group) = out.split_at_mut(from);
-    for p in rest {
+    if sharp_sum <= 0.0 {
+        return;
+    }
+    for p in out.iter_mut() {
         *p *= 1.0 - best;
     }
-    for (p, score) in group.iter_mut().zip(scores) {
-        *p = if sharp_sum > 0.0 {
-            best * score.powi(4) / sharp_sum
-        } else {
-            0.0
-        };
+    for (score, target) in scores.iter().zip(targets) {
+        out[target] += best * score.powi(4) / sharp_sum;
     }
 }
 
 /// Classifieur de base complété par les poses personnalisées. Ses labels sont
 /// ceux de la base, puis ceux des poses à une main, puis ceux des poses à
-/// deux mains.
+/// deux mains. Les exemples ajoutés à un geste de base n'ont pas de label à
+/// eux : ils alimentent celui du geste.
 pub struct CustomStaticClassifier {
     base: Box<dyn StaticClassifier>,
     matchers: Vec<Matcher<Features>>,
+    /// Label alimenté par chaque élément de `matchers`.
+    targets: Vec<usize>,
     pairs: Vec<Matcher<PairFeatures>>,
     labels: Vec<String>,
     base_len: usize,
@@ -580,18 +599,32 @@ pub struct CustomStaticClassifier {
 }
 
 impl CustomStaticClassifier {
-    /// Les poses illisibles ou dont le label existe déjà sont ignorées.
+    /// Les poses illisibles ou dont le label existe déjà sont ignorées, comme
+    /// les exemples d'un geste que la base ne connaît pas.
     pub fn new(base: Box<dyn StaticClassifier>, poses: &[CustomPose]) -> Self {
         let mut labels = base.labels().to_vec();
         let base_len = labels.len();
         let mut matchers = Vec::new();
+        let mut targets = Vec::new();
         let mut pairs = Vec::new();
         let mut pair_labels: Vec<String> = Vec::new();
         for pose in poses {
+            if pose.extends_base {
+                let target = labels[..base_len]
+                    .iter()
+                    .position(|l| *l == pose.label && l != NONE_LABEL)
+                    .filter(|target| !targets.contains(target));
+                if let (Some(target), Some(matcher)) = (target, pose.single()) {
+                    targets.push(target);
+                    matchers.push(matcher);
+                }
+                continue;
+            }
             if labels.contains(&pose.label) || pair_labels.contains(&pose.label) {
                 continue;
             }
             if let Some(matcher) = pose.single() {
+                targets.push(labels.len());
                 labels.push(pose.label.clone());
                 matchers.push(matcher);
             } else if let Some(matcher) = pose.pair() {
@@ -606,6 +639,7 @@ impl CustomStaticClassifier {
             scores: vec![0.0; matchers.len()],
             pair_scores: vec![0.0; pairs.len()],
             matchers,
+            targets,
             pairs,
             labels,
             base_len,
@@ -635,7 +669,7 @@ impl StaticClassifier for CustomStaticClassifier {
         for (score, matcher) in self.scores.iter_mut().zip(&self.matchers) {
             *score = matcher.confidence(&readings);
         }
-        overlay(out, self.base_len, &self.scores);
+        overlay(out, &self.scores, self.targets.iter().copied());
         Ok(())
     }
 
@@ -653,17 +687,26 @@ impl StaticClassifier for CustomStaticClassifier {
         }
         // La pose à deux mains l'emporte sur ce que chaque main montre seule.
         for out in out {
-            overlay(out, self.pairs_from, &self.pair_scores);
+            overlay(out, &self.pair_scores, self.pairs_from..);
         }
         Ok(())
     }
 
     fn description(&self) -> String {
-        match self.matchers.len() + self.pairs.len() {
-            0 => self.base.description(),
-            1 => format!("{} + 1 pose perso", self.base.description()),
-            n => format!("{} + {n} poses perso", self.base.description()),
+        let poses = self.labels.len() - self.base_len;
+        let extended = self.matchers.len() + self.pairs.len() - poses;
+        let mut text = self.base.description();
+        match poses {
+            0 => {}
+            1 => text.push_str(" + 1 pose perso"),
+            n => text.push_str(&format!(" + {n} poses perso")),
         }
+        match extended {
+            0 => {}
+            1 => text.push_str(" + exemples pour 1 geste"),
+            n => text.push_str(&format!(" + exemples pour {n} gestes")),
+        }
+        text
     }
 }
 
@@ -1228,7 +1271,108 @@ mod tests {
     #[test]
     fn a_pose_named_like_a_base_gesture_is_ignored() {
         let pose = CustomPose::train("fist", "Faux poing", &takes(PHONE, 12)).unwrap();
-        let classifier = classifier(&[pose]);
+        let mut classifier = classifier(&[pose]);
         assert_eq!(classifier.labels(), BuiltinStaticClassifier::new().labels());
+        let (label, _) = top(&mut classifier, &hand(PHONE, [0.5, 0.5], 0.1));
+        assert_ne!(label, "fist");
+    }
+
+    /// Exemples d'une main que la base ne lit pas comme un poing, ajoutés au poing.
+    fn fist_examples(seed: u32) -> CustomPose {
+        let mut pose = CustomPose::train("fist", "fist", &takes(PHONE, seed)).unwrap();
+        pose.extends_base = true;
+        pose
+    }
+
+    #[test]
+    fn examples_widen_a_base_gesture_without_adding_a_label() {
+        let mut plain = classifier(&[]);
+        let mut noise = Noise(21);
+        let (before, _) = top(&mut plain, &noisy(PHONE, 0.0, &mut noise));
+        assert_ne!(before, "fist");
+
+        let mut classifier = classifier(&[fist_examples(20)]);
+        assert_eq!(classifier.labels(), BuiltinStaticClassifier::new().labels());
+        assert!(
+            classifier
+                .description()
+                .ends_with("+ exemples pour 1 geste")
+        );
+        for roll in [-10.0, -4.0, 3.0, 11.0] {
+            let (label, p) = top(&mut classifier, &noisy(PHONE, roll, &mut noise));
+            assert_eq!(label, "fist", "inclinaison {roll}");
+            assert!(p >= 0.85, "inclinaison {roll} : {p}");
+        }
+
+        // La base garde tout ce qu'elle reconnaissait, le vrai poing compris.
+        for builtin in [
+            Pose::OPEN_PALM,
+            Pose::FIST,
+            Pose::THUMBS_UP,
+            Pose::V_SIGN,
+            Pose::ROCK,
+            Pose::THREE,
+            Pose::POINTING,
+            Pose::PINCH,
+            Pose::RELAXED,
+        ] {
+            let sample = hand(builtin, [0.5, 0.5], 0.1);
+            let (expected, expected_p) = top(&mut plain, &sample);
+            let (label, p) = top(&mut classifier, &sample);
+            assert_eq!(label, expected, "{builtin:?}");
+            assert!((p - expected_p).abs() < 0.05, "{builtin:?} : {p}");
+        }
+    }
+
+    #[test]
+    fn examples_and_custom_poses_live_side_by_side() {
+        let four = Pose {
+            fingers: [0.0; 4],
+            thumb: 0.0,
+            pinch: false,
+            roll_deg: 0.0,
+        };
+        let four_pose = CustomPose::train("quatre", "Quatre", &takes(four, 23)).unwrap();
+        // Des exemples en double, ou pour un geste inconnu de la base, sont ignorés.
+        let mut unknown = fist_examples(24);
+        unknown.label = "inconnu".into();
+        let mut classifier =
+            classifier(&[fist_examples(22), four_pose, fist_examples(25), unknown]);
+        assert_eq!(classifier.labels().last().unwrap(), "quatre");
+        assert_eq!(
+            classifier.labels().len(),
+            BuiltinStaticClassifier::new().labels().len() + 1
+        );
+        let mut noise = Noise(26);
+        assert_eq!(
+            top(&mut classifier, &noisy(PHONE, 2.0, &mut noise)).0,
+            "fist"
+        );
+        assert_eq!(
+            top(&mut classifier, &noisy(four, -3.0, &mut noise)).0,
+            "quatre"
+        );
+    }
+
+    #[test]
+    fn examples_are_not_compared_with_their_own_gesture() {
+        let all = takes(Pose::V_SIGN, 27);
+        let samples: Vec<HandSample> = all.iter().flatten().copied().collect();
+        let mut base = BuiltinStaticClassifier::new();
+        // Des exemples de V ajoutés au V : rien à signaler.
+        let mut own = CustomPose::train("v_sign", "v_sign", &all).unwrap();
+        own.extends_base = true;
+        own.find_resemblances(&samples, &mut base, &[], 0.85);
+        assert!(own.resemblances.is_empty(), "{:?}", own.resemblances);
+        // Les mêmes, ajoutés au poing : ils lui feraient prendre les V.
+        let mut stray = CustomPose::train("fist", "fist", &all).unwrap();
+        stray.extends_base = true;
+        stray.find_resemblances(&samples, &mut base, std::slice::from_ref(&own), 0.85);
+        let labels: Vec<&str> = stray
+            .resemblances
+            .iter()
+            .map(|r| r.label.as_str())
+            .collect();
+        assert_eq!(labels, ["v_sign"]);
     }
 }

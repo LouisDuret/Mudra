@@ -7,6 +7,9 @@
 //! %APPDATA%\Mudra\gestures\dataset\static\<label>\*.jsonl  prises (points-clés)
 //! ```
 //!
+//! Les exemples ajoutés à un geste de base (`open_palm`, `fist`…) vivent au
+//! même endroit, sous le label de ce geste.
+//!
 //! Le dossier `dataset` a le format de `mudra record` : il reste utilisable
 //! par la chaîne d'entraînement Python.
 
@@ -167,7 +170,8 @@ fn take_files(root: &Path, label: &str) -> Vec<PathBuf> {
 /// Apprend (ou réapprend) la pose `label` à partir de toutes ses prises et
 /// l'écrit dans `root`. Le nom et la sensibilité d'une pose existante sont
 /// conservés si `name` est `None`. `two_hands` vaut pour une nouvelle pose :
-/// une pose existante garde son nombre de mains.
+/// une pose existante garde son nombre de mains. Si `label` est un geste du
+/// classifieur de base, les prises deviennent des exemples de ce geste.
 pub fn train_in(
     root: &Path,
     label: &str,
@@ -183,7 +187,9 @@ pub fn train_in(
         .unwrap_or(label)
         .to_string();
     let enter = config.defaults.static_enter;
-    let mut pose = if previous.map_or(two_hands, |p| p.two_hands) {
+    let (mut base, _, _) = crate::pipeline::load_base_classifiers(config);
+    let extends_base = base.labels().iter().any(|l| l == label);
+    let mut pose = if !extends_base && previous.map_or(two_hands, |p| p.two_hands) {
         let mut takes = Vec::with_capacity(files.len());
         for file in &files {
             takes.push(read_pair_take(file)?);
@@ -199,7 +205,7 @@ pub fn train_in(
         }
         let mut pose = CustomPose::train(label, &name, &takes).map_err(|e| e.to_string())?;
         let samples: Vec<HandSample> = takes.into_iter().flatten().collect();
-        let (mut base, _, _) = crate::pipeline::load_base_classifiers(config);
+        pose.extends_base = extends_base;
         pose.find_resemblances(&samples, base.as_mut(), &existing, enter);
         pose
     };
@@ -482,6 +488,54 @@ mod tests {
             error.contains("deux mains") && error.contains("6 images"),
             "{error}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn takes_of_a_base_gesture_become_its_examples() {
+        let root = temp_root("base");
+        let config = config();
+        let (mut base, _, _) = crate::pipeline::load_base_classifiers(&config);
+        let labels = base.labels().to_vec();
+        let fist = labels.iter().position(|l| l == "fist").unwrap();
+        let sample = hand(
+            Pose {
+                roll_deg: 4.0,
+                ..PHONE
+            },
+            [0.4, 0.4],
+            0.12,
+        );
+        let mut probs = vec![0.0; labels.len()];
+        base.classify(&sample, &mut probs).unwrap();
+        assert!(probs[fist] < 0.3, "{probs:?}");
+
+        // Ma façon de fermer le poing, que la base ne reconnaît pas.
+        for roll in [-8.0, 0.0, 8.0] {
+            write_take(&root, "fist", PHONE, roll, 120);
+        }
+        let pose = train_in(&root, "fist", None, true, &config).unwrap();
+        assert!(pose.extends_base && !pose.two_hands);
+        assert_eq!(pose.takes, 3);
+        assert!(pose.resemblances.is_empty(), "{:?}", pose.resemblances);
+
+        // Relus du disque, les exemples alimentent le poing sans créer de pose.
+        let (poses, notices) = custom::load_dir(&root);
+        assert!(notices.is_empty(), "{notices:?}");
+        let mut classifier = CustomStaticClassifier::new(base, &poses);
+        assert_eq!(classifier.labels(), labels);
+        classifier.classify(&sample, &mut probs).unwrap();
+        assert!(probs[fist] >= config.defaults.static_enter, "{probs:?}");
+
+        // Réglage, prise de plus, puis retrait : la base redevient seule.
+        update_in(&root, "fist", |p| p.sensitivity = 0.8).unwrap();
+        write_take(&root, "fist", PHONE, 12.0, 120);
+        let pose = train_in(&root, "fist", None, false, &config).unwrap();
+        assert!(pose.extends_base);
+        assert_eq!((pose.takes, pose.sensitivity), (4, 0.8));
+        delete_in(&root, "fist").unwrap();
+        assert!(custom::load_dir(&root).0.is_empty());
+        assert!(take_files(&root, "fist").is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 

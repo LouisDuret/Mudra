@@ -723,7 +723,8 @@ struct Section<'a> {
     hint: &'a str,
     labels: &'a [String],
     is_static: bool,
-    /// Poses perso de la section, avec leurs réglages.
+    /// Poses perso de la section et exemples ajoutés à ses gestes de base,
+    /// avec leurs réglages.
     custom: &'a [CustomPose],
 }
 
@@ -737,7 +738,8 @@ fn uses(config: &Config, gesture: &str) -> usize {
 }
 
 /// Réglages d'une pose perso : reconnaissance en direct, sensibilité,
-/// exemples, nom, suppression.
+/// exemples, nom, suppression. Les exemples ajoutés à un geste de base ont
+/// les mêmes, sauf le nom ; les retirer laisse le geste et ses actions.
 fn custom_controls(
     ui: &mut Ui,
     pose: &CustomPose,
@@ -821,12 +823,21 @@ fn custom_controls(
             .on_hover_text("Une prise de plus, pour une pose mal reconnue.")
             .clicked()
         {
-            state.trainer = Some(Trainer::more_examples(label, &pose.name, pose.two_hands));
+            state.trainer = Some(if pose.extends_base {
+                Trainer::base_examples(label, theme::gesture_name(label), false)
+            } else {
+                Trainer::more_examples(label, &pose.name, pose.two_hands)
+            });
         }
-        if ui.button("Renommer").clicked() {
+        if !pose.extends_base && ui.button("Renommer").clicked() {
             state.renaming = Some((label.to_string(), pose.name.clone()));
         }
-        if ui.button("Supprimer la pose").clicked() {
+        let remove = if pose.extends_base {
+            "Retirer mes exemples"
+        } else {
+            "Supprimer la pose"
+        };
+        if ui.button(remove).clicked() {
             state.confirm_delete = Some(label.to_string());
         }
     });
@@ -859,12 +870,20 @@ fn custom_controls(
     if state.confirm_delete.as_deref() == Some(label) {
         ui.horizontal_wrapped(|ui| {
             let text = match uses(config, label) {
+                _ if pose.extends_base => {
+                    "Retirer tes exemples ? Le geste sera reconnu comme avant.".to_string()
+                }
                 0 => "Supprimer cette pose et ses exemples ?".to_string(),
                 1 => "Supprimer cette pose, ses exemples et son action ?".to_string(),
                 n => format!("Supprimer cette pose, ses exemples et ses {n} actions ?"),
             };
             ui.label(RichText::new(text).color(AMBER));
-            if ui.button("Supprimer définitivement").clicked() {
+            if pose.extends_base {
+                if ui.button("Retirer").clicked() {
+                    actions.push(UiAction::RemoveExamples(label.to_string()));
+                    state.confirm_delete = None;
+                }
+            } else if ui.button("Supprimer définitivement").clicked() {
                 actions.push(UiAction::DeletePose(label.to_string()));
                 state.confirm_delete = None;
                 state.editor = None;
@@ -874,12 +893,17 @@ fn custom_controls(
             }
         });
     }
+    let advice = if pose.extends_base {
+        "ce sont tes exemples qui l'emportent : resserre la sensibilité ou retire-les"
+    } else {
+        "c'est cette pose perso qui l'emporte : resserre la sensibilité ou choisis une pose \
+         plus distincte"
+    };
     for resemblance in &pose.resemblances {
         ui.label(
             RichText::new(format!(
                 "Ressemble à « {} » ({:.0} % des images des prises). Quand les deux se \
-                 confondent, c'est cette pose perso qui l'emporte : resserre la \
-                 sensibilité ou choisis une pose plus distincte.",
+                 confondent, {advice}.",
                 theme::gesture_name(&resemblance.label),
                 resemblance.share * 100.0
             ))
@@ -898,7 +922,8 @@ fn gesture_card(
     state: &mut GesturesState,
     actions: &mut Vec<UiAction>,
 ) {
-    let custom = section.custom.iter().find(|p| p.label == gesture);
+    let pose = section.custom.iter().find(|p| p.label == gesture);
+    let custom = pose.filter(|p| !p.extends_base);
     let role = section
         .is_static
         .then(|| reserved_role(config, gesture))
@@ -920,6 +945,8 @@ fn gesture_card(
                     "perso"
                 };
                 ui.label(RichText::new(badge).small().color(ACCENT));
+            } else if pose.is_some() {
+                ui.label(RichText::new("+ tes exemples").small().color(ACCENT));
             }
             if let Some(p) = live {
                 ui.label(
@@ -940,9 +967,25 @@ fn gesture_card(
                 if ui.button(label).clicked() {
                     state.open_new_binding(gesture, section.is_static, both_only);
                 }
+                if section.is_static
+                    && pose.is_none()
+                    && ui
+                        .add_enabled(
+                            state.trainer.is_none(),
+                            egui::Button::new("Ajouter des exemples"),
+                        )
+                        .on_hover_text(
+                            "Montre à Mudra ta façon de faire ce geste, en trois courtes \
+                             prises : il le reconnaîtra plus facilement.",
+                        )
+                        .clicked()
+                {
+                    let name = theme::gesture_name(gesture);
+                    state.trainer = Some(Trainer::base_examples(gesture, name, true));
+                }
             });
         });
-        if let Some(pose) = custom {
+        if let Some(pose) = pose {
             custom_controls(ui, pose, config, status, state, actions);
         }
 
@@ -1192,7 +1235,12 @@ pub fn draw(ui: &mut Ui, model: &mut PreviewModel<'_>, actions: &mut Vec<UiActio
                     state.trainer = Some(session);
                 }
                 // Les poses perso d'abord : ce sont celles qu'on règle.
-                let is_custom = |g: &&String| section.custom.iter().any(|p| &p.label == *g);
+                let is_custom = |g: &&String| {
+                    section
+                        .custom
+                        .iter()
+                        .any(|p| &p.label == *g && !p.extends_base)
+                };
                 let gestures = section.labels.iter().filter(|g| g.as_str() != "none");
                 for gesture in gestures
                     .clone()
