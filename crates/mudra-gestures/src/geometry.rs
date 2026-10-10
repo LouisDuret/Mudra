@@ -107,11 +107,17 @@ pub fn wrist_angle_deg(image: &Landmarks) -> f32 {
     dx.atan2(-dy).to_degrees()
 }
 
+/// Constante de temps du lissage de la vitesse, en secondes : six images à
+/// 60 i/s, assez pour que le tremblement du suivi s'annule.
+const SPEED_SMOOTHING_S: f32 = 0.1;
+
 /// Estime la vitesse du centre de la main en tailles de paume par seconde (EF-33).
+/// C'est le vecteur vitesse qui est lissé, pas sa norme : le tremblement du
+/// suivi autour d'une main immobile s'annule, un vrai déplacement reste.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SpeedEstimator {
     prev: Option<([f32; 2], u64)>,
-    speed: f32,
+    velocity: [f32; 2],
 }
 
 impl SpeedEstimator {
@@ -125,14 +131,15 @@ impl SpeedEstimator {
             && now_us > t
         {
             let dt = (now_us - t) as f32 * 1e-6;
-            let d = ((center[0] - prev[0]).powi(2) + (center[1] - prev[1]).powi(2)).sqrt();
-            let instant = d / palm.max(1e-6) / dt;
-            // Lissage exponentiel d'environ 50 ms.
-            let a = (dt / 0.05).min(1.0);
-            self.speed += a * (instant - self.speed);
+            let scale = 1.0 / (palm.max(1e-6) * dt);
+            let a = (dt / SPEED_SMOOTHING_S).min(1.0);
+            for axis in 0..2 {
+                let instant = (center[axis] - prev[axis]) * scale;
+                self.velocity[axis] += a * (instant - self.velocity[axis]);
+            }
         }
         self.prev = Some((center, now_us));
-        self.speed
+        self.velocity[0].hypot(self.velocity[1])
     }
 }
 
@@ -147,6 +154,46 @@ mod tests {
         assert!((a - 90.0).abs() < 1e-3);
         let a = bend_deg([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]);
         assert!((a - 180.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn speed_ignores_tracking_jitter_but_follows_a_real_move() {
+        // Paume de 120 px, 60 i/s. Le centre d'une main immobile mal suivie
+        // saute de plusieurs pixels à chaque image.
+        const PALM: f32 = 120.0;
+        let mut seed = 7u32;
+        let mut jitter = move || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((seed >> 8) as f32 / (1u32 << 23) as f32 - 1.0) * 9.0
+        };
+        let mut still = SpeedEstimator::default();
+        let mut worst = 0.0f32;
+        let mut travelled = 0.0;
+        let mut prev = [640.0, 360.0];
+        for frame in 0..600u64 {
+            let center = [640.0 + jitter(), 360.0 + jitter()];
+            travelled += (center[0] - prev[0]).hypot(center[1] - prev[1]);
+            prev = center;
+            let speed = still.update(center, PALM, frame * 16_667);
+            if frame > 12 {
+                worst = worst.max(speed);
+            }
+        }
+        // Image par image, ce tremblement vaut plus de 2,5 paumes par seconde.
+        assert!(travelled / PALM / 10.0 > 2.5, "{travelled}");
+        assert!(worst < 2.0, "{worst}");
+
+        // La même main qui part à 6 paumes par seconde est vue en mouvement
+        // en moins de 100 ms, et sa vitesse est bien mesurée ensuite.
+        let mut moving = SpeedEstimator::default();
+        let mut reported = Vec::new();
+        for frame in 0..30u64 {
+            let x = 200.0 + 6.0 * PALM * frame as f32 / 60.0;
+            let center = [x + jitter(), 360.0 + jitter()];
+            reported.push(moving.update(center, PALM, frame * 16_667));
+        }
+        assert!(reported[6] > 2.5, "{reported:?}");
+        assert!((reported[29] - 6.0).abs() < 1.5, "{reported:?}");
     }
 
     #[test]

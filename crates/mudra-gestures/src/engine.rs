@@ -133,6 +133,8 @@ struct PoseEpisode {
 }
 
 /// Même pose tenue par les deux mains, liée par un binding `hand = "both"` (EF-24).
+/// Une pose à deux mains apprise par l'exemple en est le cas courant : le
+/// classifieur l'annonce sur les deux mains à la fois.
 #[derive(Debug, Clone, Copy)]
 struct PairEpisode {
     slot: usize,
@@ -452,6 +454,7 @@ impl Engine {
                 } else {
                     self.cfg
                         .static_binding(label, hand)
+                        .or_else(|| self.cfg.pair_binding(label))
                         .map(|b| self.cfg.bindings[b].hold_us)
                 }
             }
@@ -630,24 +633,26 @@ impl Engine {
                             |h: &HandObs<'_>| h.static_probs.get(x.label).copied().unwrap_or(0.0);
                         self.cfg
                             .pair_binding(x.label)
-                            .map(|slot| (slot, p(a).min(p(b)), a.handedness))
+                            .map(|slot| (slot, p(a).min(p(b)), a.handedness, x.paired && y.paired))
                     }
                     _ => None,
                 }
             }
             _ => None,
         };
-        let Some((slot, confidence, hand)) = common else {
+        let Some((slot, confidence, hand, consumed)) = common else {
             self.pair = None;
             return;
         };
         let mut pair = match self.pair {
             Some(p) if p.slot == slot => p,
+            // Les deux mains tiennent encore la pose déjà déclenchée : un creux
+            // de confiance n'en fait pas un nouveau geste.
             _ => PairEpisode {
                 slot,
                 start_us: now_us,
-                fired: false,
-                last_fire_us: 0,
+                fired: consumed,
+                last_fire_us: now_us,
             },
         };
         let (hold_us, repeat_us) = {
@@ -686,12 +691,13 @@ impl Engine {
             && probs[top] >= self.cfg.thresholds(top, h.handedness).0;
 
         // 1. Cycle de vie de l'épisode : maintien strict avant confirmation,
-        //    hystérésis ensuite (EF-31).
+        //    hystérésis ensuite (EF-31). Un geste à deux mains déclenché
+        //    confirme l'épisode de chaque main.
         let mut episode = self.tracks[ti].pose;
         if let Some(e) = &mut episode {
             let p = probs[e.label];
             let (enter, exit) = self.cfg.thresholds(e.label, h.handedness);
-            let ended = if !e.fired {
+            let ended = if !(e.fired || e.paired) {
                 p < enter || blocked
             } else if top != e.label && top_is_pose {
                 // Une autre pose est reconnue avec confiance : enchaînement direct.

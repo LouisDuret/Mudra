@@ -593,6 +593,40 @@ fn two_open_palms_fire_the_two_hand_binding_once() {
 }
 
 #[test]
+fn a_held_two_hand_pose_fires_once_whatever_the_tracking_does() {
+    let (mut rig, pair) = rig_with_pair("v_sign");
+    rig.arm();
+    let steady = Rig::probs(&rig.statics.clone(), "v_sign", 0.97);
+    // Entre les seuils de sortie et d'entrée : la pose est toujours tenue.
+    let weak = Rig::probs(&rig.statics.clone(), "v_sign", 0.7);
+    let none = Rig::probs(&rig.statics.clone(), "none", 1.0);
+    let mut fired = Vec::new();
+    // Trois secondes de pose tenue. Une fois le geste parti, la main gauche,
+    // mal suivie, voit sa confiance fléchir, s'effondrer un instant, puis
+    // paraît bouger d'un coup.
+    for frame in 0..180 {
+        let right = Rig::obs(&steady, None);
+        let probs = match frame % 45 {
+            20..=24 => &weak,
+            30..=32 => &none,
+            _ => &steady,
+        };
+        let mut left = Rig::obs(probs, None);
+        left.track = 2;
+        left.handedness = Handedness::Left;
+        if frame % 45 == 40 {
+            left.speed = 6.0;
+        }
+        fired.extend(fired_bindings(&rig.step(&[right, left])));
+    }
+    assert_eq!(fired, vec![pair]);
+
+    // Relâchée puis reformée, la pose est un nouveau geste.
+    rig.hold("none", 1.0, 900);
+    assert_eq!(fired_bindings(&rig.hold_both("v_sign", 600)), vec![pair]);
+}
+
+#[test]
 fn two_hand_binding_takes_priority_over_single_hand_binding() {
     let (mut rig, pair) = rig_with_pair("v_sign");
     let single = rig.binding_index("v_sign");

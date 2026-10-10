@@ -1233,11 +1233,16 @@ mod tests {
 
         let mut noise = Noise(34);
         let mut now = 1_000_000;
-        let mut show = |stage: &mut GestureStage, hands: usize, ms: u64| {
+        // `shake` : tremblement du suivi de la seconde main, en pixels.
+        let mut show = |stage: &mut GestureStage, hands: usize, ms: u64, shake: f32| {
             let mut fired = Vec::new();
+            let mut drift = [0.0f32; 2];
             for _ in 0..(ms * 1000).div_ceil(16_667) {
                 now += 16_667;
                 let pair = noisy_pair(Pose::FIST, PHONE, SIDE_BY_SIDE, 1.0, &mut noise);
+                for d in &mut drift {
+                    *d = 0.9 * *d + shake * noise.next();
+                }
                 let inputs: Vec<HandInput> = pair
                     .iter()
                     .take(hands)
@@ -1246,7 +1251,10 @@ mod tests {
                         track: 1 + i as u32,
                         handedness: h.handedness,
                         // Repère isotrope → pixels.
-                        image: h.image.map(|p| p.map(|c| c * W)),
+                        image: h.image.map(|p| {
+                            let k = i as f32;
+                            [p[0] * W + k * drift[0], p[1] * W + k * drift[1], p[2] * W]
+                        }),
                         world: h.world,
                     })
                     .collect();
@@ -1260,12 +1268,18 @@ mod tests {
             fired
         };
         // Une main seule ne déclenche rien ; les deux, une fois, l'action à deux mains.
-        assert!(show(&mut stage, 1, 800).is_empty());
-        assert_eq!(show(&mut stage, 2, 1000), vec![1]);
+        assert!(show(&mut stage, 1, 800, 0.0).is_empty());
+        assert_eq!(show(&mut stage, 2, 1000, 0.0), vec![1]);
         let label = stage.static_labels().len() - 1;
         for view in stage.hands() {
             assert_eq!(argmax(&view.static_probs), label);
         }
+
+        // Mains proches, l'une des deux est mal suivie : son centre saute de
+        // plusieurs pixels par image sans qu'elle bouge. La pose tenue trois
+        // secondes part quand même, et une seule fois.
+        assert!(show(&mut stage, 0, 1000, 0.0).is_empty());
+        assert_eq!(show(&mut stage, 2, 3000, 20.0), vec![1]);
     }
 
     #[test]
