@@ -203,7 +203,12 @@ struct Resolved {
 }
 
 impl Resolved {
-    fn new(config: &Config, static_labels: &[String], dynamic_labels: &[String]) -> Self {
+    fn new(
+        config: &Config,
+        static_labels: &[String],
+        dynamic_labels: &[String],
+        two_hand_labels: &[String],
+    ) -> Self {
         let find = |labels: &[String], name: &str| labels.iter().position(|l| l == name);
         let d = &config.defaults;
         let a = &config.activation;
@@ -222,6 +227,10 @@ impl Resolved {
                     return None;
                 }
                 if b.gesture == NONE_LABEL || !b.enabled {
+                    return None;
+                }
+                // Une pose à deux mains n'a pas de sens pour une seule.
+                if b.hand != HandFilter::Both && two_hand_labels.contains(&b.gesture) {
                     return None;
                 }
                 let kind = find(static_labels, &b.gesture)
@@ -355,8 +364,14 @@ pub struct Engine {
 
 impl Engine {
     /// Crée un moteur à l'état de repos : Verrouillé, ou Armé en mode `always_on`.
-    pub fn new(config: &Config, static_labels: &[String], dynamic_labels: &[String]) -> Self {
-        let cfg = Resolved::new(config, static_labels, dynamic_labels);
+    /// `two_hand_labels` : poses statiques qui ne se font qu'à deux mains.
+    pub fn new(
+        config: &Config,
+        static_labels: &[String],
+        dynamic_labels: &[String],
+        two_hand_labels: &[String],
+    ) -> Self {
+        let cfg = Resolved::new(config, static_labels, dynamic_labels, two_hand_labels);
         let state = Self::rest_state(&cfg);
         Self {
             last_fire_us: vec![None; cfg.bindings.len()],
@@ -408,14 +423,16 @@ impl Engine {
             .unwrap_or(self.cfg.hold_us)
             .max(1);
         let held = now_us.saturating_sub(ep.start_us);
+        // Consommée par un geste à deux mains : confirmée elle aussi.
+        let confirmed = ep.fired || ep.paired;
         Some(PoseProgress {
             label: ep.label,
-            progress: if ep.fired {
+            progress: if confirmed {
                 1.0
             } else {
                 (held as f32 / required as f32).min(1.0)
             },
-            confirmed: ep.fired,
+            confirmed,
         })
     }
 
@@ -445,10 +462,11 @@ impl Engine {
         config: &Config,
         static_labels: &[String],
         dynamic_labels: &[String],
+        two_hand_labels: &[String],
         events: &mut Vec<EngineEvent>,
     ) {
         self.end_continuous(events);
-        self.cfg = Resolved::new(config, static_labels, dynamic_labels);
+        self.cfg = Resolved::new(config, static_labels, dynamic_labels, two_hand_labels);
         self.last_fire_us = vec![None; self.cfg.bindings.len()];
         self.tracks.clear();
         self.pair = None;

@@ -44,7 +44,12 @@ pub struct GesturesState {
 
 impl GesturesState {
     /// Ouvre le formulaire d'une nouvelle action pour ce geste.
-    pub fn open_new_binding(&mut self, gesture: &str, is_static: bool, both_only: bool) {
+    pub fn open_new_binding(
+        &mut self,
+        gesture: &str,
+        is_static: bool,
+        both_only: Option<BothOnly>,
+    ) {
         self.error = None;
         self.editor = Some(Editor {
             target: None,
@@ -53,7 +58,7 @@ impl GesturesState {
             draft: Binding {
                 gesture: gesture.to_string(),
                 enabled: true,
-                hand: if both_only {
+                hand: if both_only.is_some() {
                     HandFilter::Both
                 } else {
                     HandFilter::Any
@@ -71,14 +76,22 @@ impl GesturesState {
     }
 }
 
+/// Pourquoi un geste ne peut être associé qu'à deux mains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BothOnly {
+    /// Geste réservé à une main : réveil, verrouillage, contrôle continu.
+    Reserved,
+    /// Pose perso qui ne se fait qu'à deux mains.
+    TwoHandPose,
+}
+
 /// Formulaire d'un binding en cours de création ou de modification.
 pub struct Editor {
     /// Indice du binding modifié ; `None` pour une création.
     pub target: Option<usize>,
     pub is_static: bool,
-    /// Geste réservé à une main (réveil, verrouillage, contrôle continu) :
-    /// seul un binding à deux mains est possible.
-    pub both_only: bool,
+    /// Seul un binding à deux mains est possible, et pourquoi.
+    pub both_only: Option<BothOnly>,
     pub draft: Binding,
     pub capturing: bool,
 }
@@ -459,14 +472,16 @@ fn editor_ui(
                 ui.label(RichText::new("Main").color(MUTED));
                 ui.horizontal(|ui| {
                     let hand = &mut editor.draft.hand;
-                    if editor.both_only {
+                    if let Some(why) = editor.both_only {
                         *hand = HandFilter::Both;
                         ui.label(hand_label(*hand));
-                        ui.label(
-                            RichText::new("(seule possibilité : ce geste est réservé à une main)")
-                                .small()
-                                .color(MUTED),
-                        );
+                        let why = match why {
+                            BothOnly::Reserved => {
+                                "(seule possibilité : ce geste est réservé à une main)"
+                            }
+                            BothOnly::TwoHandPose => "(cette pose se fait à deux mains)",
+                        };
+                        ui.label(RichText::new(why).small().color(MUTED));
                     } else {
                         for choice in [HandFilter::Any, HandFilter::Left, HandFilter::Right] {
                             ui.selectable_value(hand, choice, hand_label(choice));
@@ -713,7 +728,7 @@ fn custom_controls(
             .on_hover_text("Une prise de plus, pour une pose mal reconnue.")
             .clicked()
         {
-            state.trainer = Some(Trainer::more_examples(label, &pose.name));
+            state.trainer = Some(Trainer::more_examples(label, &pose.name, pose.two_hands));
         }
         if ui.button("Renommer").clicked() {
             state.renaming = Some((label.to_string(), pose.name.clone()));
@@ -796,11 +811,22 @@ fn gesture_card(
         .then(|| reserved_role(config, gesture))
         .flatten();
     let live = live_confidence(status, gesture, section.is_static);
+    let two_hands = custom.is_some_and(|p| p.two_hands);
+    let both_only = if role.is_some() {
+        Some(BothOnly::Reserved)
+    } else {
+        two_hands.then_some(BothOnly::TwoHandPose)
+    };
     framed(ui, CARD, |ui| {
         ui.horizontal(|ui| {
             ui.label(RichText::new(theme::gesture_name(gesture)).strong());
             if custom.is_some() {
-                ui.label(RichText::new("perso").small().color(ACCENT));
+                let badge = if two_hands {
+                    "perso · deux mains"
+                } else {
+                    "perso"
+                };
+                ui.label(RichText::new(badge).small().color(ACCENT));
             }
             if let Some(p) = live {
                 ui.label(
@@ -819,7 +845,7 @@ fn gesture_card(
                     "+ Associer une action"
                 };
                 if ui.button(label).clicked() {
-                    state.open_new_binding(gesture, section.is_static, role.is_some());
+                    state.open_new_binding(gesture, section.is_static, both_only);
                 }
             });
         });
@@ -855,7 +881,7 @@ fn gesture_card(
                         index, enabled,
                     )));
                 }
-                let ignored = role.is_some() && binding.hand != HandFilter::Both;
+                let ignored = both_only.is_some() && binding.hand != HandFilter::Both;
                 let color = if fired {
                     GREEN
                 } else if !binding.enabled || ignored {
@@ -868,7 +894,12 @@ fn gesture_card(
                 if fired {
                     ui.label(RichText::new("déclenché").small().color(GREEN));
                 } else if ignored {
-                    ui.label(RichText::new("ignoré : geste réservé").small().color(AMBER));
+                    let why = if two_hands {
+                        "ignoré : pose à deux mains"
+                    } else {
+                        "ignoré : geste réservé"
+                    };
+                    ui.label(RichText::new(why).small().color(AMBER));
                 } else if !binding.enabled {
                     ui.label(RichText::new("désactivé").small().color(MUTED));
                 }
@@ -892,7 +923,7 @@ fn gesture_card(
                         state.editor = Some(Editor {
                             target: Some(index),
                             is_static: section.is_static,
-                            both_only: role.is_some(),
+                            both_only,
                             draft: binding.clone(),
                             capturing: false,
                         });
@@ -1049,7 +1080,8 @@ pub fn draw(ui: &mut Ui, model: &mut PreviewModel<'_>, actions: &mut Vec<UiActio
                                     egui::Button::new("+ Nouvelle pose"),
                                 )
                                 .on_hover_text(
-                                    "Apprends à Mudra une pose à toi, en trois courtes prises.",
+                                    "Apprends à Mudra une pose à toi, à une ou deux mains, en \
+                                     trois courtes prises.",
                                 )
                                 .clicked()
                             {

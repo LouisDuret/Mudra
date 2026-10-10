@@ -162,6 +162,18 @@ carte, une jauge montre la reconnaissance en direct ; tu peux régler la
 reconnue, la renommer ou la supprimer. Si elle ressemble trop à un geste
 existant, la carte le signale.
 
+Coche **Pose à deux mains** avant la première prise pour une pose qui n'existe
+que si les deux mains la forment ensemble (un cœur, un cadre, un poing à
+gauche et une paume à droite). Mudra apprend alors la forme de chaque main et
+leur position l'une par rapport à l'autre ; une main seule ne la déclenche
+jamais, et son action est toujours « Deux mains ». Deux choses à savoir :
+
+- une pose asymétrique et son miroir sont deux poses différentes. Pour que
+  les deux valent pareil, ajoute une prise en miroir par **Ajouter des
+  exemples** ;
+- les mains doivent rester distinctes à l'image : mains jointes ou doigts
+  entrelacés ne sont pas suivis comme deux mains.
+
 Les poses vivent dans `%APPDATA%\Mudra\gestures\` : un fichier `.json` par
 pose et ses prises dans `dataset\`, au format de `mudra record`. Seuls les
 points-clés sont stockés, jamais d'images. Les mouvements ne s'apprennent pas

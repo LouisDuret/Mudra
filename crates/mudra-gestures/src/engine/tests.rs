@@ -20,7 +20,7 @@ impl Rig {
     fn new(config: Config) -> Self {
         let known = KnownGestures::builtin();
         Self {
-            engine: Engine::new(&config, &known.static_, &known.dynamic),
+            engine: Engine::new(&config, &known.static_, &known.dynamic, &known.two_hands),
             config,
             statics: known.static_,
             dynamics: known.dynamic,

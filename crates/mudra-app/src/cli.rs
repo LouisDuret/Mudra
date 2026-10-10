@@ -68,6 +68,7 @@ pub fn known_gestures(config: &Config) -> (KnownGestures, Vec<String>) {
         KnownGestures {
             static_: static_classifier.labels().to_vec(),
             dynamic: dynamic_classifier.labels().to_vec(),
+            two_hands: static_classifier.two_hand_labels().to_vec(),
         },
         notices,
     )

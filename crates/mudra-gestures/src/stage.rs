@@ -53,6 +53,9 @@ struct Slot {
     seen: bool,
     /// Bout de l'index non lissé : la souris a son propre profil de lissage (§7.5).
     raw_index_tip: [f32; 2],
+    /// Main vue par les classifieurs, et sa distribution statique avant lissage.
+    sample: HandSample,
+    raw_probs: Vec<f32>,
     view: HandView,
 }
 
@@ -67,7 +70,6 @@ pub struct GestureStage {
     engine: Engine,
     smoothing: Smoothing,
     slots: Vec<Slot>,
-    scratch: Vec<f32>,
     resampled: Vec<WindowSample>,
 }
 
@@ -81,14 +83,8 @@ impl GestureStage {
             config,
             static_classifier.labels(),
             dynamic_classifier.labels(),
+            static_classifier.two_hand_labels(),
         );
-        let scratch = vec![
-            0.0;
-            static_classifier
-                .labels()
-                .len()
-                .max(dynamic_classifier.labels().len())
-        ];
         let resampled = Vec::with_capacity(dynamic_classifier.window_len());
         Self {
             static_classifier,
@@ -96,7 +92,6 @@ impl GestureStage {
             engine,
             smoothing: config.smoothing,
             slots: Vec::with_capacity(4),
-            scratch,
             resampled,
         }
     }
@@ -135,6 +130,7 @@ impl GestureStage {
             config,
             self.static_classifier.labels(),
             self.dynamic_classifier.labels(),
+            self.static_classifier.two_hand_labels(),
             events,
         );
     }
@@ -148,13 +144,6 @@ impl GestureStage {
         dynamic_classifier: Box<dyn DynamicClassifier>,
         events: &mut Vec<EngineEvent>,
     ) {
-        self.scratch = vec![
-            0.0;
-            static_classifier
-                .labels()
-                .len()
-                .max(dynamic_classifier.labels().len())
-        ];
         self.resampled = Vec::with_capacity(dynamic_classifier.window_len());
         self.static_classifier = static_classifier;
         self.dynamic_classifier = dynamic_classifier;
@@ -190,6 +179,12 @@ impl GestureStage {
             dynamic_fresh: false,
             seen: false,
             raw_index_tip: [0.0; 2],
+            sample: HandSample {
+                image: empty,
+                world: empty,
+                handedness,
+            },
+            raw_probs: vec![0.0; self.static_classifier.labels().len()],
             view: HandView {
                 track,
                 handedness,
@@ -246,15 +241,9 @@ impl GestureStage {
             }
 
             // ⑤ Classifieur statique à chaque trame.
-            let scratch = &mut self.scratch[..view.static_probs.len()];
-            self.static_classifier.classify(&sample, scratch)?;
-            if slot.frames == 1 {
-                view.static_probs.copy_from_slice(scratch);
-            } else {
-                for (p, raw) in view.static_probs.iter_mut().zip(scratch.iter()) {
-                    *p += PROB_SMOOTHING * (raw - *p);
-                }
-            }
+            slot.sample = sample;
+            self.static_classifier
+                .classify(&sample, &mut slot.raw_probs)?;
 
             // ⑤ Classifieur dynamique sur fenêtre glissante, une trame sur deux.
             slot.window.push(
@@ -286,6 +275,21 @@ impl GestureStage {
             view.pinch = pinch_ratio(&view.world);
         }
         self.slots.retain(|s| s.seen);
+
+        // ⑤ Poses à deux mains, puis lissage des probabilités.
+        if let [a, b] = self.slots.as_mut_slice() {
+            self.static_classifier
+                .classify_pair([&a.sample, &b.sample], [&mut a.raw_probs, &mut b.raw_probs])?;
+        }
+        for slot in &mut self.slots {
+            if slot.frames == 1 {
+                slot.view.static_probs.copy_from_slice(&slot.raw_probs);
+            } else {
+                for (p, raw) in slot.view.static_probs.iter_mut().zip(&slot.raw_probs) {
+                    *p += PROB_SMOOTHING * (raw - *p);
+                }
+            }
+        }
 
         // ⑥ Moteur de gestes.
         let empty: &[f32] = &[];

@@ -5,14 +5,18 @@
 //! d'acceptation est calibré sur la dispersion des prises entre elles. Ces
 //! poses s'ajoutent au classifieur de base (intégré ou ONNX) au lieu de le
 //! remplacer : aucun ré-entraînement, aucune dépendance Python.
+//!
+//! Une pose à deux mains est apprise de la même façon, sur la forme de chaque
+//! main et sur leur disposition l'une par rapport à l'autre. Elle n'existe
+//! que lorsque deux mains sont visibles.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::geometry::{
-    INDEX_MCP, MIDDLE_MCP, PINKY_MCP, RING_MCP, THUMB_MCP, THUMB_TIP, V3, WRIST, dist, dot, norm,
-    palm_size, sub,
+    INDEX_MCP, MIDDLE_MCP, PINKY_MCP, RING_MCP, THUMB_MCP, THUMB_TIP, V3, WRIST, dist, dist2d, dot,
+    hand_center, norm, palm_size, palm_size_2d, sub,
 };
 use crate::{ClassifierError, HandSample, Handedness, Landmarks, NONE_LABEL, StaticClassifier};
 
@@ -22,6 +26,12 @@ pub const FORMAT_VERSION: u32 = 1;
 /// orientation de la main.
 pub const FEATURES: usize = 55;
 pub type Features = [f32; FEATURES];
+/// Disposition de deux mains : vecteur d'une paume à l'autre, puis écart
+/// entre les bouts des doigts homologues.
+const RELATION: usize = 7;
+/// Main de gauche à l'écran, main de droite, puis leur disposition.
+pub const PAIR_FEATURES: usize = 2 * FEATURES + RELATION;
+pub type PairFeatures = [f32; PAIR_FEATURES];
 
 /// Poids de l'orientation face à la forme : une main retournée (pouce levé
 /// contre pouce baissé) pèse autant qu'un doigt qui change.
@@ -31,6 +41,15 @@ const BEND_WEIGHT: f32 = 0.6;
 /// Poids de la hauteur des bouts de doigts au-dessus de la paume : la
 /// profondeur est la mesure la plus bruitée du suivi.
 const DEPTH_WEIGHT: f32 = 0.5;
+/// Poids du vecteur d'une paume à l'autre, et des écarts entre bouts de doigts.
+const POSITION_WEIGHT: f32 = 0.7;
+const CONTACT_WEIGHT: f32 = 0.5;
+/// Écart, en tailles de paume, autour duquel la disposition sature : deux
+/// mains qui se touchent ou non diffèrent plus que deux mains éloignées de
+/// quatre ou cinq paumes.
+const RELATION_REACH: f32 = 3.0;
+/// Longueur de la paume rapportée à sa largeur (MCP de l'index à l'auriculaire).
+const PALM_ASPECT: f32 = 1.5;
 /// La distance à une pose est la moyenne des distances aux plus proches exemples.
 const NEIGHBOURS: usize = 3;
 const MAX_EXAMPLES_PER_TAKE: usize = 60;
@@ -152,7 +171,53 @@ fn mirrored_features(world: &Landmarks, mirrored: bool) -> Features {
     out
 }
 
-fn euclidean(a: &Features, b: &Features) -> f32 {
+/// Taille de la main dans l'image : la longueur de la paume, ou sa largeur
+/// quand la main pointe vers la caméra et que la longueur s'écrase.
+fn image_scale(image: &Landmarks) -> f32 {
+    palm_size_2d(image).max(PALM_ASPECT * dist2d(image[INDEX_MCP], image[PINKY_MCP]))
+}
+
+fn saturated(d: f32) -> f32 {
+    d * RELATION_REACH / (RELATION_REACH + d)
+}
+
+/// Caractéristiques de deux mains, `left` étant celle de gauche à l'écran.
+/// Chaque main est lue selon son rang et non selon la latéralité annoncée,
+/// que le suivi inverse parfois. La disposition se mesure dans l'image, en
+/// tailles de paume : les points monde de chaque main ont leur propre origine.
+fn pair_features(left: &HandSample, right: &HandSample) -> PairFeatures {
+    let mut out = [0.0; PAIR_FEATURES];
+    out[..FEATURES].copy_from_slice(&mirrored_features(&left.world, true));
+    out[FEATURES..2 * FEATURES].copy_from_slice(&mirrored_features(&right.world, false));
+    let scale = 2.0 / (image_scale(&left.image) + image_scale(&right.image)).max(1e-6);
+    let (from, to) = (hand_center(&left.image), hand_center(&right.image));
+    let offset = [(to[0] - from[0]) * scale, (to[1] - from[1]) * scale];
+    let reach = offset[0].hypot(offset[1]).max(1e-6);
+    let relation = &mut out[2 * FEATURES..];
+    for (slot, value) in relation.iter_mut().zip(offset) {
+        *slot = value / reach * saturated(reach) * POSITION_WEIGHT;
+    }
+    for (slot, tip) in relation[2..].iter_mut().zip(TIPS) {
+        *slot = saturated(dist2d(left.image[tip], right.image[tip]) * scale) * CONTACT_WEIGHT;
+    }
+    out
+}
+
+/// Les deux lectures d'une paire : mains rangées de gauche à droite à
+/// l'écran, puis dans l'ordre inverse. Deux mains l'une au-dessus de l'autre
+/// changent de rang d'une image à l'autre : la comparaison garde la lecture
+/// la plus proche.
+fn pair_readings(hands: [&HandSample; 2]) -> [PairFeatures; 2] {
+    let [a, b] = hands;
+    let (left, right) = if hand_center(&a.image)[0] <= hand_center(&b.image)[0] {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    [pair_features(left, right), pair_features(right, left)]
+}
+
+fn euclidean(a: &[f32], b: &[f32]) -> f32 {
     a.iter()
         .zip(b)
         .map(|(x, y)| (x - y) * (x - y))
@@ -160,11 +225,34 @@ fn euclidean(a: &Features, b: &Features) -> f32 {
         .sqrt()
 }
 
+/// Caractéristiques comparables entre elles : celles d'une main, ou de deux.
+trait Shape: Copy + AsRef<[f32]> + for<'a> TryFrom<&'a [f32]> {
+    fn distance(&self, other: &Self) -> f32;
+}
+
+impl Shape for Features {
+    fn distance(&self, other: &Self) -> f32 {
+        euclidean(self, other)
+    }
+}
+
+impl Shape for PairFeatures {
+    /// Écart de la partie qui s'éloigne le plus, entre chaque main et leur
+    /// disposition : chaque main doit ressembler autant que pour une pose à
+    /// une main, sans que le bruit des deux s'additionne.
+    fn distance(&self, other: &Self) -> f32 {
+        let part = |from: usize, to: usize| euclidean(&self[from..to], &other[from..to]);
+        part(0, FEATURES)
+            .max(part(FEATURES, 2 * FEATURES))
+            .max(part(2 * FEATURES, PAIR_FEATURES))
+    }
+}
+
 /// Moyenne des distances de `f` à ses plus proches exemples.
-fn knn_distance<'a>(f: &Features, examples: impl Iterator<Item = &'a Features>) -> f32 {
+fn knn_distance<'a, F: Shape + 'a>(f: &F, examples: impl Iterator<Item = &'a F>) -> f32 {
     let mut best = [f32::INFINITY; NEIGHBOURS];
     for example in examples {
-        let mut d = euclidean(f, example);
+        let mut d = f.distance(example);
         for slot in &mut best {
             if d < *slot {
                 std::mem::swap(&mut d, slot);
@@ -193,6 +281,10 @@ pub enum TrainError {
     NoTakes,
     #[error("prise {take} : la main n'a été vue que sur {frames} images, recommence-la")]
     TakeTooShort { take: usize, frames: usize },
+    #[error(
+        "prise {take} : les deux mains n'ont été vues ensemble que sur {frames} images, recommence-la"
+    )]
+    PairTakeTooShort { take: usize, frames: usize },
 }
 
 /// Ressemblance mesurée à l'apprentissage avec un autre geste.
@@ -219,6 +311,9 @@ pub struct CustomPose {
     pub takes: u32,
     #[serde(default)]
     pub resemblances: Vec<Resemblance>,
+    /// Pose qui ne se fait qu'à deux mains : ses exemples décrivent les deux.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub two_hands: bool,
     pub examples: Vec<Vec<f32>>,
 }
 
@@ -226,26 +321,52 @@ impl CustomPose {
     /// Apprend une pose à partir de ses prises. Chaque prise est une suite
     /// d'images de la main tenant la pose.
     pub fn train(label: &str, name: &str, takes: &[Vec<HandSample>]) -> Result<Self, TrainError> {
+        Self::learn(label, name, false, takes, |s| {
+            (features(&s.world, s.handedness), both_readings(&s.world))
+        })
+    }
+
+    /// Apprend une pose à deux mains. Chaque prise est une suite d'images où
+    /// les deux mains sont visibles.
+    pub fn train_pair(
+        label: &str,
+        name: &str,
+        takes: &[Vec<[HandSample; 2]>],
+    ) -> Result<Self, TrainError> {
+        Self::learn(label, name, true, takes, |[a, b]| {
+            let readings = pair_readings([a, b]);
+            (readings[0], readings)
+        })
+    }
+
+    /// `read` donne, pour une image, l'exemple à garder et ses lectures possibles.
+    fn learn<S, F: Shape>(
+        label: &str,
+        name: &str,
+        two_hands: bool,
+        takes: &[Vec<S>],
+        read: impl Fn(&S) -> (F, [F; 2]),
+    ) -> Result<Self, TrainError> {
         if takes.is_empty() {
             return Err(TrainError::NoTakes);
         }
-        let mut per_take: Vec<Vec<Features>> = Vec::with_capacity(takes.len());
-        let mut readings: Vec<Vec<[Features; 2]>> = Vec::with_capacity(takes.len());
+        let mut per_take: Vec<Vec<F>> = Vec::with_capacity(takes.len());
+        let mut readings: Vec<Vec<[F; 2]>> = Vec::with_capacity(takes.len());
         for (i, take) in takes.iter().enumerate() {
             if take.len() < MIN_TAKE_FRAMES {
-                return Err(TrainError::TakeTooShort {
-                    take: i + 1,
-                    frames: take.len(),
+                let (take, frames) = (i + 1, take.len());
+                return Err(if two_hands {
+                    TrainError::PairTakeTooShort { take, frames }
+                } else {
+                    TrainError::TakeTooShort { take, frames }
                 });
             }
             let kept = take.len().min(MAX_EXAMPLES_PER_TAKE);
-            let kept: Vec<&HandSample> = (0..kept).map(|k| &take[k * take.len() / kept]).collect();
-            per_take.push(
-                kept.iter()
-                    .map(|s| features(&s.world, s.handedness))
-                    .collect(),
-            );
-            readings.push(kept.iter().map(|s| both_readings(&s.world)).collect());
+            let (examples, read): (Vec<F>, Vec<[F; 2]>) = (0..kept)
+                .map(|k| read(&take[k * take.len() / kept]))
+                .unzip();
+            per_take.push(examples);
+            readings.push(read);
         }
         Ok(Self {
             version: FORMAT_VERSION,
@@ -255,15 +376,20 @@ impl CustomPose {
             threshold: calibrate(&per_take, &readings),
             takes: takes.len() as u32,
             resemblances: Vec::new(),
-            examples: per_take.into_iter().flatten().map(|f| f.to_vec()).collect(),
+            two_hands,
+            examples: per_take
+                .into_iter()
+                .flatten()
+                .map(|f| f.as_ref().to_vec())
+                .collect(),
         })
     }
 
-    fn matcher(&self) -> Option<Matcher> {
-        let examples: Vec<Features> = self
+    fn matcher<F: Shape>(&self) -> Option<Matcher<F>> {
+        let examples: Vec<F> = self
             .examples
             .iter()
-            .filter_map(|e| Features::try_from(e.as_slice()).ok())
+            .filter_map(|e| F::try_from(e.as_slice()).ok())
             .collect();
         (!examples.is_empty() && examples.len() == self.examples.len()).then(|| Matcher {
             threshold: self.threshold
@@ -274,9 +400,25 @@ impl CustomPose {
         })
     }
 
-    /// Confiance de la pose pour une main, entre 0 et 1.
+    fn single(&self) -> Option<Matcher<Features>> {
+        (!self.two_hands).then(|| self.matcher()).flatten()
+    }
+
+    fn pair(&self) -> Option<Matcher<PairFeatures>> {
+        self.two_hands.then(|| self.matcher()).flatten()
+    }
+
+    /// Confiance de la pose pour une main, entre 0 et 1. Toujours nulle pour
+    /// une pose à deux mains.
     pub fn confidence(&self, hand: &HandSample) -> f32 {
-        self.matcher().map_or(0.0, |m| m.confidence(&hand.world))
+        self.single()
+            .map_or(0.0, |m| m.confidence(&both_readings(&hand.world)))
+    }
+
+    /// Confiance d'une pose à deux mains pour ces deux mains.
+    pub fn pair_confidence(&self, hands: [&HandSample; 2]) -> f32 {
+        self.pair()
+            .map_or(0.0, |m| m.confidence(&pair_readings(hands)))
     }
 
     /// Mesure les ressemblances de la pose avec les gestes du classifieur de
@@ -314,14 +456,44 @@ impl CustomPose {
             }
         }
         for other in others.iter().filter(|o| o.label != self.label) {
-            let Some(matcher) = other.matcher() else {
+            let Some(matcher) = other.single() else {
                 continue;
             };
             let hits = samples
                 .iter()
-                .filter(|s| matcher.confidence(&s.world) >= enter)
+                .filter(|s| matcher.confidence(&both_readings(&s.world)) >= enter)
                 .count();
             let share = hits as f32 / total;
+            if share >= RESEMBLANCE_SHARE {
+                self.resemblances.push(Resemblance {
+                    label: other.label.clone(),
+                    share,
+                });
+            }
+        }
+    }
+
+    /// Mesure les ressemblances d'une pose à deux mains avec les autres poses
+    /// à deux mains, sur les images des prises.
+    pub fn find_pair_resemblances(
+        &mut self,
+        samples: &[[HandSample; 2]],
+        others: &[CustomPose],
+        enter: f32,
+    ) {
+        self.resemblances.clear();
+        if samples.is_empty() {
+            return;
+        }
+        for other in others.iter().filter(|o| o.label != self.label) {
+            let Some(matcher) = other.pair() else {
+                continue;
+            };
+            let hits = samples
+                .iter()
+                .filter(|[a, b]| matcher.confidence(&pair_readings([a, b])) >= enter)
+                .count();
+            let share = hits as f32 / samples.len() as f32;
             if share >= RESEMBLANCE_SHARE {
                 self.resemblances.push(Resemblance {
                     label: other.label.clone(),
@@ -335,7 +507,7 @@ impl CustomPose {
 /// Seuil d'acceptation : dispersion des prises entre elles, avec une marge.
 /// Avec une seule prise, rien ne mesure la variation d'une fois sur l'autre :
 /// le plancher s'applique.
-fn calibrate(takes: &[Vec<Features>], readings: &[Vec<[Features; 2]>]) -> f32 {
+fn calibrate<F: Shape>(takes: &[Vec<F>], readings: &[Vec<[F; 2]>]) -> f32 {
     let mut spread: Vec<f32> = Vec::new();
     if takes.len() >= 2 {
         for (i, take) in readings.iter().enumerate() {
@@ -346,8 +518,8 @@ fn calibrate(takes: &[Vec<Features>], readings: &[Vec<[Features; 2]>]) -> f32 {
                     .filter(move |(j, _)| *j != i)
                     .flat_map(|(_, t)| t.iter())
             };
-            for [right, left] in take {
-                spread.push(knn_distance(right, others()).min(knn_distance(left, others())));
+            for [first, second] in take {
+                spread.push(knn_distance(first, others()).min(knn_distance(second, others())));
             }
         }
     }
@@ -360,28 +532,51 @@ fn calibrate(takes: &[Vec<Features>], readings: &[Vec<[Features; 2]>]) -> f32 {
     (p90 * THRESHOLD_MARGIN).clamp(MIN_THRESHOLD, MAX_THRESHOLD)
 }
 
-struct Matcher {
+struct Matcher<F> {
     threshold: f32,
-    examples: Vec<Features>,
+    examples: Vec<F>,
 }
 
-impl Matcher {
-    fn confidence(&self, world: &Landmarks) -> f32 {
-        let [right, left] = both_readings(world);
-        let distance = knn_distance(&right, self.examples.iter())
-            .min(knn_distance(&left, self.examples.iter()));
+impl<F: Shape> Matcher<F> {
+    /// Confiance de la lecture la plus proche des exemples.
+    fn confidence(&self, readings: &[F; 2]) -> f32 {
+        let distance = knn_distance(&readings[0], self.examples.iter())
+            .min(knn_distance(&readings[1], self.examples.iter()));
         confidence(distance, self.threshold)
     }
 }
 
+/// La meilleure pose de `scores` prend sa confiance sur `out[..from]` ; les
+/// autres poses du groupe se partagent cette même masse, à partir de `from`.
+fn overlay(out: &mut [f32], from: usize, scores: &[f32]) {
+    let best = scores.iter().copied().fold(0.0, f32::max);
+    let sharp_sum: f32 = scores.iter().map(|s| s.powi(4)).sum();
+    let (rest, group) = out.split_at_mut(from);
+    for p in rest {
+        *p *= 1.0 - best;
+    }
+    for (p, score) in group.iter_mut().zip(scores) {
+        *p = if sharp_sum > 0.0 {
+            best * score.powi(4) / sharp_sum
+        } else {
+            0.0
+        };
+    }
+}
+
 /// Classifieur de base complété par les poses personnalisées. Ses labels sont
-/// ceux de la base suivis de ceux des poses.
+/// ceux de la base, puis ceux des poses à une main, puis ceux des poses à
+/// deux mains.
 pub struct CustomStaticClassifier {
     base: Box<dyn StaticClassifier>,
-    matchers: Vec<Matcher>,
+    matchers: Vec<Matcher<Features>>,
+    pairs: Vec<Matcher<PairFeatures>>,
     labels: Vec<String>,
     base_len: usize,
+    /// Indice du premier label à deux mains.
+    pairs_from: usize,
     scores: Vec<f32>,
+    pair_scores: Vec<f32>,
 }
 
 impl CustomStaticClassifier {
@@ -390,21 +585,31 @@ impl CustomStaticClassifier {
         let mut labels = base.labels().to_vec();
         let base_len = labels.len();
         let mut matchers = Vec::new();
+        let mut pairs = Vec::new();
+        let mut pair_labels: Vec<String> = Vec::new();
         for pose in poses {
-            if labels.contains(&pose.label) {
+            if labels.contains(&pose.label) || pair_labels.contains(&pose.label) {
                 continue;
             }
-            if let Some(matcher) = pose.matcher() {
+            if let Some(matcher) = pose.single() {
                 labels.push(pose.label.clone());
                 matchers.push(matcher);
+            } else if let Some(matcher) = pose.pair() {
+                pair_labels.push(pose.label.clone());
+                pairs.push(matcher);
             }
         }
+        let pairs_from = labels.len();
+        labels.extend(pair_labels);
         Self {
             base,
             scores: vec![0.0; matchers.len()],
+            pair_scores: vec![0.0; pairs.len()],
             matchers,
+            pairs,
             labels,
             base_len,
+            pairs_from,
         }
     }
 }
@@ -414,36 +619,47 @@ impl StaticClassifier for CustomStaticClassifier {
         &self.labels
     }
 
+    fn two_hand_labels(&self) -> &[String] {
+        &self.labels[self.pairs_from..]
+    }
+
     fn classify(&mut self, hand: &HandSample, out: &mut [f32]) -> Result<(), ClassifierError> {
         let (base_out, custom_out) = out.split_at_mut(self.base_len);
         self.base.classify(hand, base_out)?;
+        // Une main seule ne tient aucune pose à deux mains.
+        custom_out.fill(0.0);
         if self.matchers.is_empty() {
             return Ok(());
         }
-        let mut best = 0.0f32;
-        let mut sharp_sum = 0.0;
+        let readings = both_readings(&hand.world);
         for (score, matcher) in self.scores.iter_mut().zip(&self.matchers) {
-            *score = matcher.confidence(&hand.world);
-            best = best.max(*score);
-            sharp_sum += score.powi(4);
+            *score = matcher.confidence(&readings);
         }
-        // La meilleure pose perso prend sa confiance sur la distribution de
-        // base ; les autres poses perso se partagent cette même masse.
-        for p in base_out.iter_mut() {
-            *p *= 1.0 - best;
+        overlay(out, self.base_len, &self.scores);
+        Ok(())
+    }
+
+    fn classify_pair(
+        &mut self,
+        hands: [&HandSample; 2],
+        out: [&mut [f32]; 2],
+    ) -> Result<(), ClassifierError> {
+        if self.pairs.is_empty() {
+            return Ok(());
         }
-        for (p, score) in custom_out.iter_mut().zip(&self.scores) {
-            *p = if sharp_sum > 0.0 {
-                best * score.powi(4) / sharp_sum
-            } else {
-                0.0
-            };
+        let readings = pair_readings(hands);
+        for (score, matcher) in self.pair_scores.iter_mut().zip(&self.pairs) {
+            *score = matcher.confidence(&readings);
+        }
+        // La pose à deux mains l'emporte sur ce que chaque main montre seule.
+        for out in out {
+            overlay(out, self.pairs_from, &self.pair_scores);
         }
         Ok(())
     }
 
     fn description(&self) -> String {
-        match self.matchers.len() {
+        match self.matchers.len() + self.pairs.len() {
             0 => self.base.description(),
             1 => format!("{} + 1 pose perso", self.base.description()),
             n => format!("{} + {n} poses perso", self.base.description()),
@@ -476,7 +692,7 @@ pub fn load_dir(dir: &Path) -> (Vec<CustomPose>, Vec<String>) {
             .and_then(|pose| {
                 if pose.version != FORMAT_VERSION {
                     Err(format!("version {} non prise en charge", pose.version))
-                } else if pose.matcher().is_none() {
+                } else if pose.single().is_none() && pose.pair().is_none() {
                     Err("exemples absents ou mal formés".into())
                 } else {
                     Ok(pose)
@@ -733,6 +949,280 @@ mod tests {
         remove(&dir, "telephone").unwrap();
         assert!(load_dir(&dir).0.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Déplace une main synthétique (poignet en 0,5 ; 0,5) et, pour une main
+    /// gauche, la retourne.
+    fn placed(mut sample: HandSample, wrist: [f32; 2], left: bool) -> HandSample {
+        for (image, world) in sample.image.iter_mut().zip(sample.world.iter_mut()) {
+            if left {
+                image[0] = 1.0 - image[0];
+                world[0] = -world[0];
+            }
+            image[0] += wrist[0] - 0.5;
+            image[1] += wrist[1] - 0.5;
+        }
+        if left {
+            sample.handedness = Handedness::Left;
+        }
+        sample
+    }
+
+    /// Une image d'une pose à deux mains : `left` à gauche de l'écran, `right`
+    /// décalée de `gap` tailles de paume.
+    fn noisy_pair(
+        left: Pose,
+        right: Pose,
+        gap: [f32; 2],
+        roll: f32,
+        noise: &mut Noise,
+    ) -> [HandSample; 2] {
+        let at = [0.4 + 0.004 * noise.next(), 0.5 + 0.004 * noise.next()];
+        let other = [at[0] + 0.1 * gap[0], at[1] + 0.1 * gap[1]];
+        [
+            placed(noisy(left, -roll, noise), at, true),
+            placed(noisy(right, roll, noise), other, false),
+        ]
+    }
+
+    /// Trois prises : mains inclinées et écartées différemment à chaque fois.
+    fn pair_takes(left: Pose, right: Pose, gap: [f32; 2], seed: u32) -> Vec<Vec<[HandSample; 2]>> {
+        let mut noise = Noise(seed);
+        [(-8.0, -0.15), (0.0, 0.0), (9.0, 0.15)]
+            .into_iter()
+            .map(|(roll, wider)| {
+                let gap = [gap[0] + wider, gap[1]];
+                (0..80)
+                    .map(|_| noisy_pair(left, right, gap, roll, &mut noise))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Classe deux mains vues ensemble, comme le fait l'étage de gestes.
+    fn pair_top(
+        classifier: &mut CustomStaticClassifier,
+        hands: [&HandSample; 2],
+    ) -> [(String, f32); 2] {
+        let n = classifier.labels().len();
+        let (mut a, mut b) = (vec![0.0; n], vec![0.0; n]);
+        classifier.classify(hands[0], &mut a).unwrap();
+        classifier.classify(hands[1], &mut b).unwrap();
+        classifier.classify_pair(hands, [&mut a, &mut b]).unwrap();
+        [a, b].map(|probs| {
+            assert!((probs.iter().sum::<f32>() - 1.0).abs() < 1e-3, "{probs:?}");
+            let i = argmax(&probs);
+            (classifier.labels()[i].clone(), probs[i])
+        })
+    }
+
+    const SIDE_BY_SIDE: [f32; 2] = [2.5, 0.0];
+
+    #[test]
+    fn two_hand_pose_is_recognised_only_with_both_hands() {
+        let takes = pair_takes(Pose::FIST, PHONE, SIDE_BY_SIDE, 20);
+        let pose = CustomPose::train_pair("duo", "Duo", &takes).unwrap();
+        assert!(pose.two_hands);
+        assert!((MIN_THRESHOLD..=MAX_THRESHOLD).contains(&pose.threshold));
+        let phone =
+            CustomPose::train("telephone", "Téléphone", &super::tests::takes(PHONE, 21)).unwrap();
+        // Les poses à deux mains viennent après celles à une main.
+        let mut classifier = classifier(&[pose.clone(), phone]);
+        assert_eq!(classifier.labels().last().unwrap(), "duo");
+        assert_eq!(classifier.two_hand_labels(), ["duo".to_string()]);
+
+        let mut noise = Noise(22);
+        for roll in [-10.0, -3.0, 4.0, 11.0] {
+            let [left, right] = noisy_pair(Pose::FIST, PHONE, [2.6, 0.1], roll, &mut noise);
+            for (label, p) in pair_top(&mut classifier, [&left, &right]) {
+                assert_eq!(label, "duo", "inclinaison {roll}");
+                assert!(p >= 0.85, "inclinaison {roll} : {p}");
+            }
+            // Ni l'ordre des mains ni la latéralité annoncée ne comptent.
+            let (mut wrong_left, mut wrong_right) = (left, right);
+            wrong_left.handedness = Handedness::Right;
+            wrong_right.handedness = Handedness::Left;
+            for (label, p) in pair_top(&mut classifier, [&wrong_right, &wrong_left]) {
+                assert_eq!(label, "duo", "inclinaison {roll}");
+                assert!(p >= 0.85, "inclinaison {roll} : {p}");
+            }
+
+            // Une main seule garde sa lecture à une main.
+            assert_eq!(top(&mut classifier, &right).0, "telephone");
+            assert_eq!(top(&mut classifier, &left).0, "fist");
+            assert_eq!(pose.confidence(&right), 0.0);
+        }
+    }
+
+    #[test]
+    fn two_hand_pose_depends_on_each_hand_and_on_their_layout() {
+        let takes = pair_takes(Pose::FIST, PHONE, SIDE_BY_SIDE, 23);
+        let pose = CustomPose::train_pair("duo", "Duo", &takes).unwrap();
+        let mut noise = Noise(24);
+        let mut confidence = |left: Pose, right: Pose, gap: [f32; 2]| {
+            let [a, b] = noisy_pair(left, right, gap, 0.0, &mut noise);
+            pose.pair_confidence([&a, &b])
+        };
+        assert!(confidence(Pose::FIST, PHONE, SIDE_BY_SIDE) >= 0.85);
+        // Une main change de forme.
+        assert!(confidence(Pose::FIST, Pose::OPEN_PALM, SIDE_BY_SIDE) < 0.3);
+        assert!(confidence(Pose::V_SIGN, PHONE, SIDE_BY_SIDE) < 0.3);
+        // Les deux formes échangent leur côté : c'est une autre pose.
+        assert!(confidence(PHONE, Pose::FIST, SIDE_BY_SIDE) < 0.3);
+        // Mêmes formes, autre disposition.
+        assert!(confidence(Pose::FIST, PHONE, [0.4, 2.5]) < 0.3);
+        assert!(confidence(Pose::FIST, PHONE, [6.0, 0.0]) < 0.5);
+    }
+
+    #[test]
+    fn stacked_hands_are_recognised_whichever_is_leftmost() {
+        // La main de droite est au-dessus de l'autre, à peine décalée.
+        let above = |dx: f32| [dx, -2.2];
+        let mut noise = Noise(25);
+        let takes: Vec<Vec<[HandSample; 2]>> = [-6.0, 0.0, 7.0]
+            .into_iter()
+            .map(|roll| {
+                (0..80)
+                    .map(|_| noisy_pair(Pose::OPEN_PALM, Pose::FIST, above(0.15), roll, &mut noise))
+                    .collect()
+            })
+            .collect();
+        let pose = CustomPose::train_pair("etage", "Étage", &takes).unwrap();
+        for dx in [0.15, 0.0, -0.15] {
+            let [a, b] = noisy_pair(Pose::OPEN_PALM, Pose::FIST, above(dx), 2.0, &mut noise);
+            assert!(pose.pair_confidence([&a, &b]) >= 0.85, "décalage {dx}");
+        }
+        // Le poing en dessous : autre pose.
+        let [a, b] = noisy_pair(Pose::OPEN_PALM, Pose::FIST, [0.0, 2.2], 2.0, &mut noise);
+        assert!(pose.pair_confidence([&a, &b]) < 0.3);
+    }
+
+    #[test]
+    fn two_hand_poses_do_not_steal_each_other_and_twins_are_reported() {
+        let duo_takes = pair_takes(Pose::FIST, PHONE, SIDE_BY_SIDE, 26);
+        let mut duo = CustomPose::train_pair("duo", "Duo", &duo_takes).unwrap();
+        let palms = CustomPose::train_pair(
+            "paumes",
+            "Paumes",
+            &pair_takes(PHONE, PHONE, SIDE_BY_SIDE, 27),
+        )
+        .unwrap();
+        let twin = CustomPose::train_pair(
+            "jumeau",
+            "Jumeau",
+            &pair_takes(Pose::FIST, PHONE, SIDE_BY_SIDE, 28),
+        )
+        .unwrap();
+        let phone = CustomPose::train("telephone", "Téléphone", &takes(PHONE, 29)).unwrap();
+
+        let mut classifier = classifier(&[duo.clone(), palms.clone()]);
+        let mut noise = Noise(30);
+        let [a, b] = noisy_pair(Pose::FIST, PHONE, SIDE_BY_SIDE, 3.0, &mut noise);
+        assert_eq!(pair_top(&mut classifier, [&a, &b])[0].0, "duo");
+        let [a, b] = noisy_pair(PHONE, PHONE, SIDE_BY_SIDE, -3.0, &mut noise);
+        assert_eq!(pair_top(&mut classifier, [&a, &b])[1].0, "paumes");
+
+        // Seule une autre pose à deux mains peut ressembler à celle-ci.
+        let samples: Vec<[HandSample; 2]> = duo_takes.into_iter().flatten().collect();
+        duo.find_pair_resemblances(&samples, &[palms, phone, twin], 0.85);
+        assert_eq!(duo.resemblances.len(), 1, "{:?}", duo.resemblances);
+        assert_eq!(duo.resemblances[0].label, "jumeau");
+    }
+
+    #[test]
+    fn short_two_hand_take_is_refused_and_files_keep_the_number_of_hands() {
+        let mut all = pair_takes(Pose::FIST, PHONE, SIDE_BY_SIDE, 31);
+        let pose = CustomPose::train_pair("duo", "Duo", &all).unwrap();
+        all[2].truncate(7);
+        assert_eq!(
+            CustomPose::train_pair("duo", "Duo", &all),
+            Err(TrainError::PairTakeTooShort { take: 3, frames: 7 })
+        );
+
+        let dir = std::env::temp_dir().join(format!("mudra-custom-pair-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        save(&dir, &pose).unwrap();
+        // Exemples d'une main annoncés comme ceux de deux : illisible.
+        let mut broken = CustomPose::train("faux", "Faux", &takes(PHONE, 32)).unwrap();
+        broken.two_hands = true;
+        save(&dir, &broken).unwrap();
+        let (poses, notices) = load_dir(&dir);
+        assert_eq!(poses, vec![pose]);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("faux.json"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_hand_pose_fires_its_two_hand_binding_through_the_engine() {
+        use crate::builtin::BuiltinDynamicClassifier;
+        use crate::engine::EngineEvent;
+        use crate::stage::{GestureStage, HandInput};
+
+        const W: f32 = 1280.0;
+        let pose = CustomPose::train_pair(
+            "duo",
+            "Duo",
+            &pair_takes(Pose::FIST, PHONE, SIDE_BY_SIDE, 33),
+        )
+        .unwrap();
+        let mut config = mudra_config::parse(
+            mudra_config::DEFAULT_CONFIG_TOML,
+            std::path::Path::new("default.toml"),
+        )
+        .unwrap();
+        config.activation.mode = mudra_config::ActivationMode::AlwaysOn;
+        let mut both = config.bindings[0].clone();
+        both.gesture = "duo".into();
+        both.hand = mudra_config::HandFilter::Both;
+        both.hold_ms = Some(300);
+        both.repeat_ms = None;
+        // Une action à une main sur une pose à deux mains est ignorée.
+        let mut single = both.clone();
+        single.hand = mudra_config::HandFilter::Any;
+        config.bindings = vec![single, both];
+        config.continuous.clear();
+        let mut stage = GestureStage::new(
+            &config,
+            Box::new(classifier(&[pose])),
+            Box::new(BuiltinDynamicClassifier::new()),
+        );
+
+        let mut noise = Noise(34);
+        let mut now = 1_000_000;
+        let mut show = |stage: &mut GestureStage, hands: usize, ms: u64| {
+            let mut fired = Vec::new();
+            for _ in 0..(ms * 1000).div_ceil(16_667) {
+                now += 16_667;
+                let pair = noisy_pair(Pose::FIST, PHONE, SIDE_BY_SIDE, 1.0, &mut noise);
+                let inputs: Vec<HandInput> = pair
+                    .iter()
+                    .take(hands)
+                    .enumerate()
+                    .map(|(i, h)| HandInput {
+                        track: 1 + i as u32,
+                        handedness: h.handedness,
+                        // Repère isotrope → pixels.
+                        image: h.image.map(|p| p.map(|c| c * W)),
+                        world: h.world,
+                    })
+                    .collect();
+                let mut events = Vec::new();
+                stage.process(now, W, 720.0, &inputs, &mut events).unwrap();
+                fired.extend(events.into_iter().filter_map(|e| match e {
+                    EngineEvent::GestureFired { binding, .. } => Some(binding),
+                    _ => None,
+                }));
+            }
+            fired
+        };
+        // Une main seule ne déclenche rien ; les deux, une fois, l'action à deux mains.
+        assert!(show(&mut stage, 1, 800).is_empty());
+        assert_eq!(show(&mut stage, 2, 1000), vec![1]);
+        let label = stage.static_labels().len() - 1;
+        for view in stage.hands() {
+            assert_eq!(argmax(&view.static_probs), label);
+        }
     }
 
     #[test]

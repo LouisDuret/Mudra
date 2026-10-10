@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use mudra_config::Config;
-use mudra_dataset::{Hand, read_session};
+use mudra_dataset::{FrameRecord, Hand, read_session};
 use mudra_gestures::custom::{self, CustomPose};
 use mudra_gestures::{HandSample, Handedness};
 
@@ -88,6 +88,24 @@ pub fn unique_label(name: &str, taken: &[&str]) -> Option<String> {
         .find(|candidate| !taken.contains(&candidate.as_str()))
 }
 
+/// Une main enregistrée, au format des classifieurs. Le fichier normalise y
+/// par la hauteur ; les classifieurs veulent un repère isotrope, tout divisé
+/// par la largeur : `aspect` est la hauteur de l'image rapportée à sa largeur.
+fn sample(record: &FrameRecord, aspect: f32) -> HandSample {
+    let mut image = record.image;
+    for p in image.iter_mut() {
+        p[1] *= aspect;
+    }
+    HandSample {
+        image,
+        world: record.world,
+        handedness: match record.hand {
+            Hand::Left => Handedness::Left,
+            Hand::Right => Handedness::Right,
+        },
+    }
+}
+
 /// Images d'une prise, au format des classifieurs. Si deux mains sont
 /// visibles, seule la plus présente compte. Le tri ne se fait pas sur la
 /// latéralité : le suivi en change parfois d'une image à l'autre.
@@ -97,25 +115,12 @@ fn read_take(path: &Path) -> Result<Vec<HandSample>, String> {
     for r in &records {
         *presence.entry(r.track).or_default() += 1;
     }
-    // Le fichier normalise y par la hauteur ; les classifieurs veulent un
-    // repère isotrope, tout divisé par la largeur.
     let aspect = header.height as f32 / header.width.max(1) as f32;
     let mut samples: Vec<HandSample> = Vec::with_capacity(records.len());
     let mut last: Option<(u64, usize)> = None;
     for r in records {
         let weight = presence[&r.track];
-        let mut image = r.image;
-        for p in image.iter_mut() {
-            p[1] *= aspect;
-        }
-        let sample = HandSample {
-            image,
-            world: r.world,
-            handedness: match r.hand {
-                Hand::Left => Handedness::Left,
-                Hand::Right => Handedness::Right,
-            },
-        };
+        let sample = sample(&r, aspect);
         match last {
             // Deuxième main sur la même image : la plus présente l'emporte.
             Some((t, best)) if t == r.t => {
@@ -133,6 +138,20 @@ fn read_take(path: &Path) -> Result<Vec<HandSample>, String> {
     Ok(samples)
 }
 
+/// Images d'une prise à deux mains : celles où les deux mains sont visibles.
+pub fn read_pair_take(path: &Path) -> Result<Vec<[HandSample; 2]>, String> {
+    let (header, records) = read_session(path).map_err(|e| e.to_string())?;
+    let aspect = header.height as f32 / header.width.max(1) as f32;
+    // Les mains d'une même image se suivent, avec le même horodatage.
+    Ok(records
+        .chunk_by(|a, b| a.t == b.t)
+        .filter_map(|frame| match frame {
+            [a, b] => Some([sample(a, aspect), sample(b, aspect)]),
+            _ => None,
+        })
+        .collect())
+}
+
 fn take_files(root: &Path, label: &str) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(takes_dir(root, label))
         .into_iter()
@@ -147,36 +166,46 @@ fn take_files(root: &Path, label: &str) -> Vec<PathBuf> {
 
 /// Apprend (ou réapprend) la pose `label` à partir de toutes ses prises et
 /// l'écrit dans `root`. Le nom et la sensibilité d'une pose existante sont
-/// conservés si `name` est `None`.
+/// conservés si `name` est `None`. `two_hands` vaut pour une nouvelle pose :
+/// une pose existante garde son nombre de mains.
 pub fn train_in(
     root: &Path,
     label: &str,
     name: Option<&str>,
+    two_hands: bool,
     config: &Config,
 ) -> Result<CustomPose, String> {
     let files = take_files(root, label);
-    let mut takes = Vec::with_capacity(files.len());
-    for file in &files {
-        takes.push(read_take(file)?);
-    }
     let (existing, _) = custom::load_dir(root);
     let previous = existing.iter().find(|p| p.label == label);
     let name = name
         .or(previous.map(|p| p.name.as_str()))
         .unwrap_or(label)
         .to_string();
-    let mut pose = CustomPose::train(label, &name, &takes).map_err(|e| e.to_string())?;
+    let enter = config.defaults.static_enter;
+    let mut pose = if previous.map_or(two_hands, |p| p.two_hands) {
+        let mut takes = Vec::with_capacity(files.len());
+        for file in &files {
+            takes.push(read_pair_take(file)?);
+        }
+        let mut pose = CustomPose::train_pair(label, &name, &takes).map_err(|e| e.to_string())?;
+        let samples: Vec<[HandSample; 2]> = takes.into_iter().flatten().collect();
+        pose.find_pair_resemblances(&samples, &existing, enter);
+        pose
+    } else {
+        let mut takes = Vec::with_capacity(files.len());
+        for file in &files {
+            takes.push(read_take(file)?);
+        }
+        let mut pose = CustomPose::train(label, &name, &takes).map_err(|e| e.to_string())?;
+        let samples: Vec<HandSample> = takes.into_iter().flatten().collect();
+        let (mut base, _, _) = crate::pipeline::load_base_classifiers(config);
+        pose.find_resemblances(&samples, base.as_mut(), &existing, enter);
+        pose
+    };
     if let Some(previous) = previous {
         pose.sensitivity = previous.sensitivity;
     }
-    let samples: Vec<HandSample> = takes.into_iter().flatten().collect();
-    let (mut base, _, _) = crate::pipeline::load_base_classifiers(config);
-    pose.find_resemblances(
-        &samples,
-        base.as_mut(),
-        &existing,
-        config.defaults.static_enter,
-    );
     custom::save(root, &pose).map_err(|e| format!("écriture de la pose : {e}"))?;
     Ok(pose)
 }
@@ -244,9 +273,8 @@ mod tests {
         mudra_config::parse(mudra_config::DEFAULT_CONFIG_TOML, Path::new("default.toml")).unwrap()
     }
 
-    /// Écrit une prise comme le ferait le pipeline : image 1280 × 720, y
-    /// normalisé par la hauteur.
-    fn write_take(root: &Path, label: &str, pose: Pose, roll: f32, frames: usize) -> PathBuf {
+    /// Ouvre une prise comme le ferait le pipeline : image 1280 × 720.
+    fn session(root: &Path, label: &str) -> SessionWriter {
         let header = SessionHeader {
             format_version: mudra_dataset::FORMAT_VERSION,
             kind: SessionKind::Static,
@@ -260,33 +288,68 @@ mod tests {
             clips: None,
             clip_seconds: None,
         };
-        let mut writer = SessionWriter::create(&root.join("dataset"), header).unwrap();
+        SessionWriter::create(&root.join("dataset"), header).unwrap()
+    }
+
+    /// Une main de l'image `frame`, y normalisé par la hauteur.
+    fn record(frame: usize, track: u32, sample: &HandSample) -> FrameRecord {
+        let mut image = sample.image;
+        for p in image.iter_mut() {
+            p[1] *= 1280.0 / 720.0;
+        }
+        FrameRecord {
+            t: frame as u64 * 16_667,
+            track,
+            hand: match sample.handedness {
+                Handedness::Left => Hand::Left,
+                Handedness::Right => Hand::Right,
+            },
+            hand_score: 0.99,
+            presence: 0.99,
+            image,
+            world: sample.world,
+            clip: None,
+        }
+    }
+
+    /// Main un peu différente à chaque image, comme une vraie main qui tient la pose.
+    fn wobbly(pose: Pose, roll: f32, frame: usize, wrist: [f32; 2]) -> HandSample {
+        let wobble = (frame as f32 * 0.7).sin();
+        hand(
+            Pose {
+                roll_deg: roll + 2.0 * wobble,
+                ..pose
+            },
+            wrist,
+            0.1 + 0.005 * wobble,
+        )
+    }
+
+    fn write_take(root: &Path, label: &str, pose: Pose, roll: f32, frames: usize) -> PathBuf {
+        let mut writer = session(root, label);
         for i in 0..frames {
-            let wobble = (i as f32 * 0.7).sin();
-            let sample = hand(
-                Pose {
-                    roll_deg: roll + 2.0 * wobble,
-                    ..pose
-                },
-                [0.5, 0.3],
-                0.1 + 0.005 * wobble,
-            );
-            let mut image = sample.image;
-            for p in image.iter_mut() {
-                p[1] *= 1280.0 / 720.0;
+            let sample = wobbly(pose, roll, i, [0.5, 0.3]);
+            writer.write(&record(i, 1, &sample)).unwrap();
+        }
+        writer.finish().unwrap()
+    }
+
+    /// Prise à deux mains : poing à gauche de l'écran, « téléphone » à droite.
+    /// La main de droite n'est vue que sur les `both` premières images.
+    fn write_pair_take(root: &Path, label: &str, roll: f32, frames: usize, both: usize) -> PathBuf {
+        let mut writer = session(root, label);
+        for i in 0..frames {
+            let mut left = wobbly(Pose::FIST, -roll, i, [0.35, 0.3]);
+            for (image, world) in left.image.iter_mut().zip(left.world.iter_mut()) {
+                image[0] = 0.7 - image[0];
+                world[0] = -world[0];
             }
-            writer
-                .write(&FrameRecord {
-                    t: i as u64 * 16_667,
-                    track: 1,
-                    hand: Hand::Right,
-                    hand_score: 0.99,
-                    presence: 0.99,
-                    image,
-                    world: sample.world,
-                    clip: None,
-                })
-                .unwrap();
+            left.handedness = Handedness::Left;
+            writer.write(&record(i, 1, &left)).unwrap();
+            if i < both {
+                let right = wobbly(PHONE, roll, i, [0.6, 0.3]);
+                writer.write(&record(i, 2, &right)).unwrap();
+            }
         }
         writer.finish().unwrap()
     }
@@ -319,7 +382,7 @@ mod tests {
         for roll in [-8.0, 0.0, 8.0] {
             write_take(&root, "telephone", PHONE, roll, 120);
         }
-        let pose = train_in(&root, "telephone", Some("Téléphone"), &config).unwrap();
+        let pose = train_in(&root, "telephone", Some("Téléphone"), false, &config).unwrap();
         assert_eq!((pose.name.as_str(), pose.takes), ("Téléphone", 3));
         assert!(pose.resemblances.is_empty(), "{:?}", pose.resemblances);
 
@@ -343,7 +406,7 @@ mod tests {
         // Réglage puis nouvelle prise : le réglage et le nom survivent.
         update_in(&root, "telephone", |p| p.sensitivity = 1.3).unwrap();
         write_take(&root, "telephone", PHONE, 12.0, 120);
-        let pose = train_in(&root, "telephone", None, &config).unwrap();
+        let pose = train_in(&root, "telephone", None, false, &config).unwrap();
         assert_eq!(
             (pose.name.as_str(), pose.takes, pose.sensitivity),
             ("Téléphone", 4, 1.3)
@@ -361,13 +424,13 @@ mod tests {
         let root = temp_root("short");
         write_take(&root, "telephone", PHONE, 0.0, 120);
         let short = write_take(&root, "telephone", PHONE, 5.0, 4);
-        let error = train_in(&root, "telephone", Some("Téléphone"), &config()).unwrap_err();
+        let error = train_in(&root, "telephone", Some("Téléphone"), false, &config()).unwrap_err();
         assert!(error.contains("4 images"), "{error}");
         assert!(custom::load_dir(&root).0.is_empty());
 
         discard_takes(&[short]);
         assert_eq!(take_files(&root, "telephone").len(), 1);
-        assert!(train_in(&root, "telephone", Some("Téléphone"), &config()).is_ok());
+        assert!(train_in(&root, "telephone", Some("Téléphone"), false, &config()).is_ok());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -377,10 +440,144 @@ mod tests {
         for roll in [-5.0, 0.0, 5.0] {
             write_take(&root, "mon_v", Pose::V_SIGN, roll, 120);
         }
-        let pose = train_in(&root, "mon_v", Some("Mon V"), &config()).unwrap();
+        let pose = train_in(&root, "mon_v", Some("Mon V"), false, &config()).unwrap();
         assert_eq!(pose.resemblances.len(), 1, "{:?}", pose.resemblances);
         assert_eq!(pose.resemblances[0].label, "v_sign");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn two_hand_pose_is_trained_from_the_frames_showing_both_hands() {
+        let root = temp_root("pair");
+        let config = config();
+        for roll in [-6.0, 0.0, 6.0] {
+            write_pair_take(&root, "duo", roll, 120, 100);
+        }
+        let take = take_files(&root, "duo").remove(0);
+        assert_eq!(read_pair_take(&take).unwrap().len(), 100);
+        assert_eq!(read_take(&take).unwrap().len(), 120);
+
+        let pose = train_in(&root, "duo", Some("Duo"), true, &config).unwrap();
+        assert!(pose.two_hands);
+        assert_eq!((pose.name.as_str(), pose.takes), ("Duo", 3));
+        assert!(pose.resemblances.is_empty(), "{:?}", pose.resemblances);
+
+        // Relue du disque, la pose est connue comme pose à deux mains.
+        let (poses, notices) = custom::load_dir(&root);
+        assert!(notices.is_empty(), "{notices:?}");
+        let (base, _, _) = crate::pipeline::load_base_classifiers(&config);
+        let classifier = CustomStaticClassifier::new(base, &poses);
+        assert_eq!(classifier.two_hand_labels(), ["duo".to_string()]);
+
+        // Une prise de plus : la pose reste à deux mains, quoi que dise l'appelant.
+        write_pair_take(&root, "duo", 10.0, 120, 120);
+        let pose = train_in(&root, "duo", None, false, &config).unwrap();
+        assert!(pose.two_hands);
+        assert_eq!((pose.name.as_str(), pose.takes), ("Duo", 4));
+
+        // Une prise où la seconde main n'apparaît presque pas est refusée.
+        write_pair_take(&root, "duo", 0.0, 120, 6);
+        let error = train_in(&root, "duo", None, true, &config).unwrap_err();
+        assert!(
+            error.contains("deux mains") && error.contains("6 images"),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// De bout en bout sur une photo à deux mains, modèles de vision compris :
+    /// prises, apprentissage, puis reconnaissance en direct. Dans un dossier
+    /// jetable : `MUDRA_GESTURES_DIR=… cargo test --release -p mudra-app
+    /// two_real_hands -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a besoin des modèles de vision et de MUDRA_GESTURES_DIR vers un dossier jetable"]
+    fn two_real_hands_are_learnt_and_recognised_by_the_pipeline() {
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        use crate::pipeline::{
+            self, Command, Options, PipelineEvent, RecordEvent, RecordKind, RecordRequest, Source,
+        };
+
+        assert!(
+            std::env::var_os("MUDRA_GESTURES_DIR").is_some(),
+            "MUDRA_GESTURES_DIR doit désigner un dossier jetable"
+        );
+        let _ = std::fs::remove_dir_all(dir());
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut config = config();
+        for model in [&mut config.models.palm, &mut config.models.landmarks] {
+            *model = repo.join(&*model).display().to_string();
+        }
+        let config = Arc::new(config);
+        let pipeline = pipeline::start(Options {
+            config: config.clone(),
+            source: Source::Still(repo.join("tests/fixtures/hands/woman_hands.jpg")),
+            actions: None,
+            notify: None,
+            start_paused: false,
+        })
+        .unwrap();
+
+        // L'en-tête d'une prise porte la taille des images : attendre les premières.
+        let two_hands_by = |deadline: Instant| {
+            while pipeline.status().hands.len() < 2 {
+                assert!(
+                    Instant::now() < deadline,
+                    "deux mains attendues sur la photo"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+        two_hands_by(Instant::now() + Duration::from_secs(10));
+
+        for take in 1..=3 {
+            pipeline.send(Command::Record(RecordRequest {
+                label: "duo".into(),
+                kind: RecordKind::Static { seconds: 1.0 },
+                dataset_root: dataset_root(),
+            }));
+            loop {
+                match pipeline.events.recv_timeout(Duration::from_secs(15)) {
+                    Ok(PipelineEvent::Recording(RecordEvent::Done { path, frames })) => {
+                        let pairs = read_pair_take(&path).unwrap().len();
+                        println!("prise {take} : {frames} mains, {pairs} images à deux mains");
+                        break;
+                    }
+                    Ok(PipelineEvent::Recording(RecordEvent::Failed(message))) => {
+                        panic!("prise {take} : {message}")
+                    }
+                    Ok(_) => {}
+                    Err(e) => panic!("prise {take} : {e}"),
+                }
+            }
+        }
+        let pose = train_in(&dir(), "duo", Some("Duo"), true, &config).unwrap();
+        println!(
+            "seuil {:.3} · {} exemples",
+            pose.threshold,
+            pose.examples.len()
+        );
+        pipeline.send(Command::ReloadClassifiers);
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let hands = pipeline.status().hands;
+            let seen = hands.len() == 2
+                && hands.iter().all(|h| {
+                    h.top_static
+                        .first()
+                        .is_some_and(|(label, p)| label == "duo" && *p >= 0.85)
+                });
+            if seen {
+                println!("reconnue : {:?}", hands[0].top_static);
+                break;
+            }
+            assert!(Instant::now() < deadline, "pose non reconnue : {hands:?}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        drop(pipeline);
+        let _ = std::fs::remove_dir_all(dir());
     }
 
     /// Mesure sur de vraies prises, si le dépôt en contient (dossier ignoré

@@ -36,6 +36,8 @@ impl fmt::Display for Issue {
 pub struct KnownGestures {
     pub static_: Vec<String>,
     pub dynamic: Vec<String>,
+    /// Poses de `static_` qui ne se font qu'à deux mains.
+    pub two_hands: Vec<String>,
 }
 
 impl KnownGestures {
@@ -62,6 +64,7 @@ impl KnownGestures {
                 "swipe_up",
                 "swipe_down",
             ]),
+            two_hands: Vec::new(),
         }
     }
 
@@ -71,6 +74,10 @@ impl KnownGestures {
 
     pub fn is_dynamic(&self, gesture: &str) -> bool {
         gesture != "none" && self.dynamic.iter().any(|g| g == gesture)
+    }
+
+    pub fn is_two_hands(&self, gesture: &str) -> bool {
+        self.two_hands.iter().any(|g| g == gesture)
     }
 }
 
@@ -331,6 +338,15 @@ pub fn validate(config: &Config, known: &KnownGestures) -> Vec<Issue> {
                 ),
             );
         }
+        if !both && known.is_two_hands(&b.gesture) {
+            c.warn(
+                format!("{field}.hand"),
+                format!(
+                    "« {} » est une pose à deux mains : binding ignoré sans hand = \"both\"",
+                    b.gesture
+                ),
+            );
+        }
         if is_dynamic && b.repeat_ms.is_some() {
             c.warn(
                 format!("{field}.repeat_ms"),
@@ -368,6 +384,12 @@ pub fn validate(config: &Config, known: &KnownGestures) -> Vec<Issue> {
             );
         }
         c.static_gesture(&format!("{field}.enter_gesture"), &k.enter_gesture);
+        if known.is_two_hands(&k.enter_gesture) {
+            c.error(
+                format!("{field}.enter_gesture"),
+                "une pose à deux mains ne peut pas piloter un contrôle continu",
+            );
+        }
         if config.continuous[..i]
             .iter()
             .any(|o| o.enter_gesture == k.enter_gesture && o.hand == k.hand)
@@ -451,6 +473,37 @@ mod tests {
         let on_hand = |toml: &str| check(toml).iter().any(|i| i.field.ends_with(".hand"));
         assert!(!on_hand(&pair("thumbs_up")));
         assert!(on_hand(&pair("swipe_left")));
+    }
+
+    #[test]
+    fn two_hand_pose_wants_a_two_hand_binding() {
+        let mut known = KnownGestures::builtin();
+        known.static_.push("coeur".into());
+        known.two_hands.push("coeur".into());
+        let issues = |toml: &str| {
+            let config = crate::parse(toml, Path::new("test.toml")).unwrap();
+            validate(&config, &known)
+        };
+        let binding = |hand: &str| {
+            format!(
+                "[inference]\nmax_hands = 2\n[[bindings]]\ngesture = \"coeur\"\nhand = \"{hand}\"\naction = {{ type = \"snip\" }}\n"
+            )
+        };
+        let on_hand = |toml: &str| -> Vec<Level> {
+            let on_hand = |i: &Issue| i.field == "bindings[0].hand";
+            issues(toml)
+                .iter()
+                .filter(|i| on_hand(i))
+                .map(|i| i.level)
+                .collect()
+        };
+        assert!(on_hand(&binding("both")).is_empty());
+        assert_eq!(on_hand(&binding("any")), vec![Level::Warning]);
+        let continuous = "[[continuous]]\nname = \"v\"\nenter_gesture = \"coeur\"\ncontrol = { type = \"volume\" }\n";
+        assert!(has_error(
+            &issues(continuous),
+            "continuous[0].enter_gesture"
+        ));
     }
 
     fn has_error(issues: &[Issue], field: &str) -> bool {

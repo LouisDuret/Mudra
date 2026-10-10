@@ -21,10 +21,18 @@ const INSTRUCTIONS: [&str; 3] = [
     "Baisse la main, reforme la pose et incline-la légèrement.",
     "Encore une fois, un peu plus près ou plus loin de la caméra.",
 ];
+const TWO_HAND_INSTRUCTIONS: [&str; 3] = [
+    "Forme la pose des deux mains face à la caméra et tiens-la.",
+    "Baisse les mains, reforme la pose et incline-la légèrement.",
+    "Encore une fois, un peu plus près ou plus loin de la caméra. Si l'écart entre \
+     les mains ne doit pas compter, change-le.",
+];
 
 /// Séance d'apprentissage en cours.
 pub struct Trainer {
     pub name: String,
+    /// La pose ne se fait qu'à deux mains ; figé à la première prise.
+    pub two_hands: bool,
     /// Pose existante à compléter (label) ; `None` pour une nouvelle pose.
     pub existing: Option<String>,
     /// Identifiant de la pose, figé à la première prise.
@@ -38,6 +46,7 @@ impl Trainer {
     pub fn new_pose() -> Self {
         Self {
             name: String::new(),
+            two_hands: false,
             existing: None,
             label: None,
             takes: Vec::new(),
@@ -45,9 +54,10 @@ impl Trainer {
         }
     }
 
-    pub fn more_examples(label: &str, name: &str) -> Self {
+    pub fn more_examples(label: &str, name: &str, two_hands: bool) -> Self {
         Self {
             name: name.to_string(),
+            two_hands,
             existing: Some(label.to_string()),
             label: Some(label.to_string()),
             takes: Vec::new(),
@@ -141,6 +151,33 @@ pub(super) fn draw(
                             (None, _) => "Le nom doit contenir au moins une lettre.".to_string(),
                         };
                         ui.label(RichText::new(hint).small().color(MUTED));
+                        let two_tracked = camera.config.inference.max_hands >= 2;
+                        // La case a par défaut la couleur et l'arrondi des
+                        // cartes : on en fait un carré qui se détache du fond.
+                        ui.scope(|ui| {
+                            let widgets = &mut ui.visuals_mut().widgets;
+                            for state in [
+                                &mut widgets.inactive,
+                                &mut widgets.hovered,
+                                &mut widgets.active,
+                            ] {
+                                state.bg_fill = BORDER;
+                                state.corner_radius = egui::CornerRadius::same(3);
+                            }
+                            ui.add_enabled(
+                                done == 0 && !recording && two_tracked,
+                                egui::Checkbox::new(&mut trainer.two_hands, "Pose à deux mains"),
+                            )
+                            .on_hover_text(
+                                "La pose n'existe que si les deux mains la forment ensemble : \
+                                 leur forme et leur position l'une par rapport à l'autre comptent.",
+                            )
+                            .on_disabled_hover_text(if two_tracked {
+                                "Ne se change plus une fois la première prise faite."
+                            } else {
+                                "Mudra ne suit qu'une main (inference.max_hands = 1)."
+                            });
+                        });
                         ui.add_space(4.0);
                     }
 
@@ -162,8 +199,13 @@ pub(super) fn draw(
                         };
                         ui.label(RichText::new(text).strong());
                     });
+                    let instructions = if trainer.two_hands {
+                        TWO_HAND_INSTRUCTIONS
+                    } else {
+                        INSTRUCTIONS
+                    };
                     let instruction = if done < needed || trainer.existing.is_some() {
-                        INSTRUCTIONS[done.min(INSTRUCTIONS.len() - 1)]
+                        instructions[done.min(instructions.len() - 1)]
                     } else {
                         "C'est assez pour apprendre la pose. Une prise de plus la rend plus tolérante."
                     };
@@ -227,6 +269,7 @@ pub(super) fn draw(
                                             .existing
                                             .is_none()
                                             .then(|| trainer.name.trim().to_string()),
+                                        two_hands: trainer.two_hands,
                                     });
                                 }
                             }
@@ -245,6 +288,15 @@ pub(super) fn draw(
                                 .small()
                                 .color(AMBER),
                             );
+                        } else if trainer.two_hands && camera.status.hands.len() < 2 {
+                            ui.label(
+                                RichText::new(
+                                    "Une seule main détectée : place les deux dans le cadre, sans \
+                                     que l'une cache l'autre.",
+                                )
+                                .small()
+                                .color(AMBER),
+                            );
                         }
                     }
                     if let Some(error) = &trainer.error {
@@ -253,7 +305,7 @@ pub(super) fn draw(
                     ui.add_space(4.0);
                     ui.label(
                         RichText::new(
-                            "Seuls les points-clés de la main sont enregistrés, jamais d'image. \
+                            "Seuls les points-clés des mains sont enregistrés, jamais d'image. \
                              Aucune action ne se déclenche pendant une prise.",
                         )
                         .small()

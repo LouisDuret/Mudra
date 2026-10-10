@@ -71,6 +71,7 @@ pub enum UiAction {
     TrainFinish {
         label: String,
         name: Option<String>,
+        two_hands: bool,
     },
     /// Supprime des prises abandonnées.
     DiscardTakes(Vec<PathBuf>),

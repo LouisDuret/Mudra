@@ -34,7 +34,7 @@ use crate::pipeline::{
     RecordRequest, Source, Status,
 };
 use crate::platform;
-use crate::ui::gestures::GesturesState;
+use crate::ui::gestures::{BothOnly, GesturesState};
 use crate::ui::overlay::{self, OverlayModel};
 use crate::ui::preview::{self, LogEntry, LogKind, PreviewModel, RecordForm, Tab, UiAction};
 use crate::ui::{EguiWindow, TrayKind, theme, tray_icon_rgba};
@@ -765,10 +765,15 @@ impl App {
         }));
     }
 
-    fn train_finish(&mut self, label: String, name: Option<String>) {
+    fn train_finish(&mut self, label: String, name: Option<String>, two_hands: bool) {
         let created = name.is_some();
-        let trained =
-            crate::custom::train_in(&crate::custom::dir(), &label, name.as_deref(), &self.config);
+        let trained = crate::custom::train_in(
+            &crate::custom::dir(),
+            &label,
+            name.as_deref(),
+            two_hands,
+            &self.config,
+        );
         match trained {
             Ok(pose) => {
                 self.gestures.trainer = None;
@@ -783,7 +788,8 @@ impl App {
                 );
                 if created {
                     // Une pose sans action ne sert à rien : le formulaire s'ouvre.
-                    self.gestures.open_new_binding(&label, true, false);
+                    let both_only = pose.two_hands.then_some(BothOnly::TwoHandPose);
+                    self.gestures.open_new_binding(&label, true, both_only);
                 }
             }
             Err(e) => match &mut self.gestures.trainer {
@@ -925,7 +931,11 @@ impl App {
                 }
             }
             UiAction::TrainTake { label } => self.train_take(label),
-            UiAction::TrainFinish { label, name } => self.train_finish(label, name),
+            UiAction::TrainFinish {
+                label,
+                name,
+                two_hands,
+            } => self.train_finish(label, name, two_hands),
             UiAction::DiscardTakes(files) => crate::custom::discard_takes(&files),
             UiAction::SetPoseSensitivity { label, value } => {
                 self.edit_pose(&label, |pose| pose.sensitivity = value);
@@ -1158,13 +1168,24 @@ impl App {
                 let Some(trainer) = &mut self.gestures.trainer else {
                     return;
                 };
-                if (frames as usize) < mudra_gestures::custom::MIN_TAKE_FRAMES {
+                // À deux mains, seules comptent les images où les deux sont visibles.
+                let seen = if trainer.two_hands {
+                    crate::custom::read_pair_take(&path).map_or(0, |pairs| pairs.len())
+                } else {
+                    frames as usize
+                };
+                if seen < mudra_gestures::custom::MIN_TAKE_FRAMES {
                     crate::custom::discard_takes(&[path]);
-                    trainer.error = Some(
+                    trainer.error = Some(if trainer.two_hands {
+                        "Les deux mains n'ont presque pas été vues ensemble pendant cette \
+                         prise : elle n'est pas gardée. Garde les deux dans le cadre, sans \
+                         que l'une cache l'autre, et recommence."
+                            .into()
+                    } else {
                         "La main n'a presque pas été vue pendant cette prise : elle n'est pas \
                          gardée. Place ta main dans le cadre et recommence."
-                            .into(),
-                    );
+                            .into()
+                    });
                 } else {
                     trainer.takes.push(path);
                 }

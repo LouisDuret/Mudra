@@ -73,6 +73,20 @@ pub enum ClassifierError {
 pub trait StaticClassifier: Send {
     fn labels(&self) -> &[String];
     fn classify(&mut self, hand: &HandSample, out: &mut [f32]) -> Result<(), ClassifierError>;
+    /// Labels, parmi `labels()`, des poses qui ne se font qu'à deux mains.
+    fn two_hand_labels(&self) -> &[String] {
+        &[]
+    }
+    /// Quand exactement deux mains sont visibles : `out` contient la
+    /// distribution que `classify` a donnée à chacune, et la part des poses à
+    /// deux mains y est ajoutée, la même pour les deux.
+    fn classify_pair(
+        &mut self,
+        _hands: [&HandSample; 2],
+        _out: [&mut [f32]; 2],
+    ) -> Result<(), ClassifierError> {
+        Ok(())
+    }
     /// Nom affiché dans l'aperçu (« intégré », nom du fichier ONNX…).
     fn description(&self) -> String;
 }
