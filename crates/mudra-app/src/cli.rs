@@ -642,7 +642,7 @@ pub fn record(config: Arc<Config>, source: Source, request: RecordRequest) -> Re
             "Label « {} » · pose statique · {seconds:.0} s. Garde la pose en variant légèrement position et orientation.",
             request.label
         ),
-        RecordKind::Dynamic { reps } => {
+        RecordKind::Dynamic { reps, .. } => {
             println!(
                 "Label « {} » · geste dynamique · {reps} répétitions. Fais le geste à chaque bip.",
                 request.label

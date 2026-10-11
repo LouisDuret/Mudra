@@ -1,10 +1,12 @@
-//! Poses personnalisées côté application : où elles vivent sur le disque,
-//! comment leur identifiant est tiré du nom, et l'apprentissage à partir des
-//! prises enregistrées par le pipeline.
+//! Poses et mouvements personnalisés côté application : où ils vivent sur le
+//! disque, comment leur identifiant est tiré du nom, et l'apprentissage à
+//! partir des prises enregistrées par le pipeline.
 //!
 //! ```text
-//! %APPDATA%\Mudra\gestures\<label>.json                    pose apprise
-//! %APPDATA%\Mudra\gestures\dataset\static\<label>\*.jsonl  prises (points-clés)
+//! %APPDATA%\Mudra\gestures\<label>.json                     pose apprise
+//! %APPDATA%\Mudra\gestures\dataset\static\<label>\*.jsonl   prises (points-clés)
+//! %APPDATA%\Mudra\gestures\movements\<label>.json           mouvement appris
+//! %APPDATA%\Mudra\gestures\dataset\dynamic\<label>\*.jsonl  prises (points-clés)
 //! ```
 //!
 //! Les exemples ajoutés à un geste de base (`open_palm`, `fist`…) vivent au
@@ -19,10 +21,14 @@ use std::path::{Path, PathBuf};
 use mudra_config::Config;
 use mudra_dataset::{FrameRecord, Hand, read_session};
 use mudra_gestures::custom::{self, CustomPose};
+use mudra_gestures::motion::{self, CustomMove, MoveError};
+use mudra_gestures::window::WindowSample;
 use mudra_gestures::{HandSample, Handedness};
 
 /// Durée d'une prise, en secondes.
 pub const TAKE_SECONDS: f32 = 4.0;
+/// Temps laissé pour faire le geste pendant une prise de mouvement, en secondes.
+pub const MOVE_TAKE_SECONDS: f32 = 2.0;
 /// Nombre de prises demandées pour une nouvelle pose.
 pub const TAKES_FOR_NEW_POSE: usize = 3;
 
@@ -43,6 +49,19 @@ pub fn dataset_root() -> PathBuf {
 
 fn takes_dir(root: &Path, label: &str) -> PathBuf {
     root.join("dataset").join("static").join(label)
+}
+
+fn moves_in(root: &Path) -> PathBuf {
+    root.join("movements")
+}
+
+/// Dossier des mouvements perso.
+pub fn moves_dir() -> PathBuf {
+    moves_in(&dir())
+}
+
+fn move_takes_dir(root: &Path, label: &str) -> PathBuf {
+    root.join("dataset").join("dynamic").join(label)
 }
 
 /// Identifiant snake_case tiré d'un nom libre : « Téléphone ! » → `telephone`.
@@ -109,17 +128,17 @@ fn sample(record: &FrameRecord, aspect: f32) -> HandSample {
     }
 }
 
-/// Images d'une prise, au format des classifieurs. Si deux mains sont
-/// visibles, seule la plus présente compte. Le tri ne se fait pas sur la
+/// Images horodatées d'une prise, au format des classifieurs. Si deux mains
+/// sont visibles, seule la plus présente compte. Le tri ne se fait pas sur la
 /// latéralité : le suivi en change parfois d'une image à l'autre.
-fn read_take(path: &Path) -> Result<Vec<HandSample>, String> {
+fn read_main_hand(path: &Path) -> Result<Vec<(u64, HandSample)>, String> {
     let (header, records) = read_session(path).map_err(|e| e.to_string())?;
     let mut presence: HashMap<u32, usize> = HashMap::new();
     for r in &records {
         *presence.entry(r.track).or_default() += 1;
     }
     let aspect = header.height as f32 / header.width.max(1) as f32;
-    let mut samples: Vec<HandSample> = Vec::with_capacity(records.len());
+    let mut samples: Vec<(u64, HandSample)> = Vec::with_capacity(records.len());
     let mut last: Option<(u64, usize)> = None;
     for r in records {
         let weight = presence[&r.track];
@@ -128,17 +147,59 @@ fn read_take(path: &Path) -> Result<Vec<HandSample>, String> {
             // Deuxième main sur la même image : la plus présente l'emporte.
             Some((t, best)) if t == r.t => {
                 if weight > best {
-                    *samples.last_mut().expect("image précédente") = sample;
+                    samples.last_mut().expect("image précédente").1 = sample;
                     last = Some((t, weight));
                 }
             }
             _ => {
-                samples.push(sample);
+                samples.push((r.t, sample));
                 last = Some((r.t, weight));
             }
         }
     }
     Ok(samples)
+}
+
+/// Images d'une prise de pose.
+fn read_take(path: &Path) -> Result<Vec<HandSample>, String> {
+    Ok(read_main_hand(path)?
+        .into_iter()
+        .map(|(_, sample)| sample)
+        .collect())
+}
+
+/// Prise de mouvement, ramenée à la cadence de l'apprentissage.
+fn read_move_take(path: &Path) -> Result<Vec<WindowSample>, String> {
+    let frames: Vec<(u64, WindowSample)> = read_main_hand(path)?
+        .into_iter()
+        .map(|(t, sample)| {
+            let sample = WindowSample {
+                image: sample.image,
+                world: sample.world,
+            };
+            (t, sample)
+        })
+        .collect();
+    Ok(motion::uniform(&frames))
+}
+
+/// Ce qui empêche de garder la prise de mouvement `path`, dit à l'utilisateur.
+pub fn move_take_problem(path: &Path) -> Option<String> {
+    let take = match read_move_take(path) {
+        Ok(take) => take,
+        Err(e) => return Some(e),
+    };
+    let advice = match motion::check_take(&take).err()? {
+        MoveError::TooLong { .. } => {
+            "Le mouvement a duré plus d'une seconde : fais un geste plus bref."
+        }
+        MoveError::TooSmall { .. } => "Le mouvement est trop petit : fais-le plus ample.",
+        MoveError::NoMovement { .. } | MoveError::NoTakes => {
+            "Aucun mouvement net n'a été vu : au signal, fais le geste une fois, franchement, \
+             la main bien dans le cadre."
+        }
+    };
+    Some(format!("{advice} Cette prise n'est pas gardée."))
 }
 
 /// Images d'une prise à deux mains : celles où les deux mains sont visibles.
@@ -156,7 +217,11 @@ pub fn read_pair_take(path: &Path) -> Result<Vec<[HandSample; 2]>, String> {
 }
 
 fn take_files(root: &Path, label: &str) -> Vec<PathBuf> {
-    let mut files: Vec<PathBuf> = std::fs::read_dir(takes_dir(root, label))
+    session_files(&takes_dir(root, label))
+}
+
+fn session_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
@@ -242,6 +307,68 @@ pub fn delete_in(root: &Path, label: &str) -> Result<(), String> {
     }
 }
 
+/// Apprend (ou réapprend) le mouvement `label` à partir de toutes ses prises
+/// et l'écrit dans `root`. Le nom et la sensibilité d'un mouvement existant
+/// sont conservés si `name` est `None`.
+pub fn train_move_in(
+    root: &Path,
+    label: &str,
+    name: Option<&str>,
+    config: &Config,
+) -> Result<CustomMove, String> {
+    let files = session_files(&move_takes_dir(root, label));
+    let (existing, _) = motion::load_dir(&moves_in(root));
+    let previous = existing.iter().find(|m| m.label == label);
+    let name = name
+        .or(previous.map(|m| m.name.as_str()))
+        .unwrap_or(label)
+        .to_string();
+    let mut takes = Vec::with_capacity(files.len());
+    for file in &files {
+        takes.push(read_move_take(file)?);
+    }
+    let mut learnt = CustomMove::train(label, &name, &takes).map_err(|e| e.to_string())?;
+    let (_, mut base, _) = crate::pipeline::load_base_classifiers(config);
+    learnt.find_resemblances(
+        &takes,
+        base.as_mut(),
+        &existing,
+        config.defaults.dynamic_threshold,
+    );
+    if let Some(previous) = previous {
+        learnt.sensitivity = previous.sensitivity;
+    }
+    motion::save(&moves_in(root), &learnt).map_err(|e| format!("écriture du mouvement : {e}"))?;
+    Ok(learnt)
+}
+
+/// Modifie un mouvement déjà appris (nom, sensibilité) sans le réapprendre.
+pub fn update_move_in(
+    root: &Path,
+    label: &str,
+    edit: impl FnOnce(&mut CustomMove),
+) -> Result<(), String> {
+    let (moves, _) = motion::load_dir(&moves_in(root));
+    let mut learnt = moves
+        .into_iter()
+        .find(|m| m.label == label)
+        .ok_or_else(|| format!("mouvement « {label} » introuvable"))?;
+    edit(&mut learnt);
+    motion::save(&moves_in(root), &learnt).map_err(|e| format!("écriture du mouvement : {e}"))
+}
+
+/// Supprime un mouvement et ses prises.
+pub fn delete_move_in(root: &Path, label: &str) -> Result<(), String> {
+    motion::remove(&moves_in(root), label)
+        .map_err(|e| format!("suppression du mouvement : {e}"))?;
+    match std::fs::remove_dir_all(move_takes_dir(root, label)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(format!("suppression des prises : {e}"))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Supprime les prises d'une pose abandonnée avant d'avoir été apprise.
 pub fn discard_takes(files: &[PathBuf]) {
     for file in files {
@@ -281,9 +408,13 @@ mod tests {
 
     /// Ouvre une prise comme le ferait le pipeline : image 1280 × 720.
     fn session(root: &Path, label: &str) -> SessionWriter {
+        session_of(root, label, SessionKind::Static)
+    }
+
+    fn session_of(root: &Path, label: &str, kind: SessionKind) -> SessionWriter {
         let header = SessionHeader {
             format_version: mudra_dataset::FORMAT_VERSION,
-            kind: SessionKind::Static,
+            kind,
             label: label.into(),
             camera: "test".into(),
             width: 1280,
@@ -488,6 +619,68 @@ mod tests {
             error.contains("deux mains") && error.contains("6 images"),
             "{error}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Écrit une prise de mouvement et renvoie son fichier.
+    fn move_take(root: &Path, label: &str, seconds: f32, size: f32) -> PathBuf {
+        use mudra_gestures::motion::synthetic::{circle, play};
+        let mut writer = session_of(root, label, SessionKind::Dynamic);
+        let frames = play(circle, Pose::FIST, seconds, size, (0.5, 0.6), 0.03);
+        for (frame, s) in frames.iter().enumerate() {
+            let sample = HandSample {
+                image: s.image,
+                world: s.world,
+                handedness: Handedness::Right,
+            };
+            writer.write(&record(frame, 1, &sample)).unwrap();
+        }
+        writer.finish().unwrap()
+    }
+
+    #[test]
+    fn takes_of_a_movement_become_a_custom_movement() {
+        use mudra_gestures::DynamicClassifier;
+        use mudra_gestures::builtin::BuiltinDynamicClassifier;
+        use mudra_gestures::motion::CustomDynamicClassifier;
+
+        let root = temp_root("mouvement");
+        for (seconds, size) in [(0.55, 0.95), (0.6, 1.0), (0.66, 1.08)] {
+            let take = move_take(&root, "cercle", seconds, size);
+            assert!(take.starts_with(root.join("dataset").join("dynamic").join("cercle")));
+            assert_eq!(move_take_problem(&take), None);
+        }
+        let learnt = train_move_in(&root, "cercle", Some("Cercle"), &config()).unwrap();
+        assert_eq!((learnt.name.as_str(), learnt.takes()), ("Cercle", 3));
+        assert!(learnt.resemblances.is_empty(), "{:?}", learnt.resemblances);
+
+        // Relu du disque, le mouvement complète le classifieur dynamique.
+        let (moves, notices) = motion::load_dir(&moves_in(&root));
+        assert!(notices.is_empty(), "{notices:?}");
+        assert_eq!(moves, vec![learnt]);
+        let classifier =
+            CustomDynamicClassifier::new(Box::new(BuiltinDynamicClassifier::new()), &moves);
+        assert_eq!(classifier.labels().last().unwrap(), "cercle");
+        // Il ne se mêle pas aux poses perso, rangées dans le dossier parent.
+        assert!(custom::load_dir(&root).0.is_empty());
+
+        // Une prise sans geste est refusée, avec un conseil.
+        let still = move_take(&root, "cercle", 0.6, 0.0);
+        let problem = move_take_problem(&still).expect("prise immobile");
+        assert!(problem.contains("Aucun mouvement"), "{problem}");
+        discard_takes(&[still]);
+
+        // Le réglage et le nom survivent à une prise de plus.
+        update_move_in(&root, "cercle", |m| m.sensitivity = 0.8).unwrap();
+        move_take(&root, "cercle", 0.62, 1.02);
+        let again = train_move_in(&root, "cercle", None, &config()).unwrap();
+        assert_eq!((again.name.as_str(), again.takes()), ("Cercle", 4));
+        assert_eq!(again.sensitivity, 0.8);
+
+        delete_move_in(&root, "cercle").unwrap();
+        assert!(motion::load_dir(&moves_in(&root)).0.is_empty());
+        assert!(!move_takes_dir(&root, "cercle").exists());
+        assert!(update_move_in(&root, "cercle", |_| {}).is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
 

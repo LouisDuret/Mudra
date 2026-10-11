@@ -25,6 +25,8 @@ pub struct General {
     pub sounds: bool,
     pub overlay: bool,
     pub autostart: bool,
+    /// Thème des fenêtres ; se change aussi par le bouton de la barre du haut.
+    pub theme: Theme,
 }
 
 impl Default for General {
@@ -35,6 +37,25 @@ impl Default for General {
             sounds: true,
             overlay: true,
             autostart: false,
+            theme: Theme::Dark,
+        }
+    }
+}
+
+/// Thème de l'interface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Theme {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl Theme {
+    pub fn toggled(self) -> Self {
+        match self {
+            Theme::Dark => Theme::Light,
+            Theme::Light => Theme::Dark,
         }
     }
 }

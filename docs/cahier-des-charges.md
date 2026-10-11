@@ -409,7 +409,7 @@ Calibration des probabilités par temperature scaling sur le jeu de validation (
 
 ### 7.10 Interface (mudra-app)
 
-- Icônes de notification générées (32×32 RGBA, embarquées) : gris = Pause, contour = Verrouillé, bleu = Armé, vert = Continu, rouge = erreur.
+- Icônes de notification générées (32×32 RGBA, embarquées) : gris = Pause, contour = Verrouillé, ambre = Armé, vert = Continu, rouge = erreur.
 - Fenêtre d'aperçu : intégration egui dans la boucle winit du thread principal (egui-winit + egui-wgpu, ou eframe si l'ouverture/fermeture répétée fonctionne). Fenêtre créée et détruite à la demande. Point validé dès la phase 0 (spike).
 - Les images transmises à l'aperçu passent par un slot « dernière valeur », uniquement quand la fenêtre est ouverte.
 

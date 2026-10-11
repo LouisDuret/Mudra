@@ -1,8 +1,10 @@
-//! Interface de Mudra (§7.10) : thème sombre, fenêtres egui créées et détruites
-//! à la demande dans l'unique boucle d'événements winit (D-14), icônes de la
-//! zone de notification.
+//! Interface de Mudra (§7.10) : thèmes sombre et clair, fenêtres egui créées
+//! et détruites à la demande dans l'unique boucle d'événements winit (D-14),
+//! icônes de la zone de notification.
 
 pub mod gestures;
+mod icons;
+mod neu;
 pub mod overlay;
 pub mod preview;
 pub mod theme;
@@ -36,7 +38,8 @@ impl EguiWindow {
                 .context("création de la fenêtre")?,
         );
         let ctx = egui::Context::default();
-        theme::apply(&ctx);
+        theme::install(&ctx);
+        window.set_theme(Some(window_theme()));
         let mut painter = pollster::block_on(Painter::new(
             ctx.clone(),
             egui_wgpu::WgpuConfiguration::default(),
@@ -50,7 +53,7 @@ impl EguiWindow {
             ViewportId::ROOT,
             &window,
             Some(window.scale_factor() as f32),
-            Some(winit::window::Theme::Dark),
+            Some(window_theme()),
             painter.max_texture_side(),
         );
         Ok(Self {
@@ -74,6 +77,13 @@ impl EguiWindow {
     }
 
     pub fn request_redraw(&self) {
+        self.window.request_redraw();
+    }
+
+    /// Reprend les couleurs du thème en service, barre de titre comprise.
+    pub fn apply_theme(&self) {
+        theme::apply(&self.ctx);
+        self.window.set_theme(Some(window_theme()));
         self.window.request_redraw();
     }
 
@@ -119,6 +129,14 @@ impl EguiWindow {
     }
 }
 
+/// Thème de la barre de titre, accordé à celui de l'interface.
+fn window_theme() -> winit::window::Theme {
+    match theme::current() {
+        mudra_config::Theme::Dark => winit::window::Theme::Dark,
+        mudra_config::Theme::Light => winit::window::Theme::Light,
+    }
+}
+
 /// Catégorie d'icône de la zone de notification (§7.10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TrayKind {
@@ -148,16 +166,16 @@ impl TrayKind {
     ];
 }
 
-/// Icône 32×32 RGBA générée : gris = Pause, contour = Verrouillé, bleu = Armé,
+/// Icône 32×32 RGBA générée : gris = Pause, contour = Verrouillé, ambre = Armé,
 /// vert = Continu, rouge = erreur.
 pub fn tray_icon_rgba(kind: TrayKind) -> Vec<u8> {
     const SIZE: usize = 32;
     let color = match kind {
-        TrayKind::Paused => theme::GRAY,
-        TrayKind::Locked => theme::TEXT,
-        TrayKind::Armed => theme::ACCENT,
+        TrayKind::Paused => theme::TRAY_PAUSED,
+        TrayKind::Locked => theme::TRAY_LOCKED,
+        TrayKind::Armed => theme::TRAY_ARMED,
         TrayKind::Continuous => theme::GREEN,
-        TrayKind::Error => theme::RED,
+        TrayKind::Error => theme::TRAY_ERROR,
     };
     let [r, g, b, _] = color.to_array();
     let mut rgba = vec![0u8; SIZE * SIZE * 4];

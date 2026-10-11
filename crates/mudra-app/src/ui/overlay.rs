@@ -2,9 +2,10 @@
 //! traversable par la souris, qui ne prend jamais le focus. Elle affiche l'état
 //! du moteur et le dernier geste reconnu ; elle sert aussi de notification.
 
-use egui::{Align, Color32, Layout, RichText, Sense, Ui, Vec2};
+use egui::{Align, Color32, Layout, Sense, Ui, Vec2};
 
-use super::theme::{MUTED, TEXT};
+use super::neu;
+use super::theme::{Weight, palette};
 
 pub const WIDTH: f64 = 400.0;
 pub const HEIGHT: f64 = 52.0;
@@ -16,10 +17,11 @@ pub struct OverlayModel<'a> {
 }
 
 pub fn draw(ui: &mut Ui, model: &OverlayModel<'_>) {
+    let p = palette();
     egui::CentralPanel::default()
         .frame(
             egui::Frame::new()
-                .fill(super::theme::PANEL)
+                .fill(p.bg)
                 .inner_margin(egui::Margin::symmetric(16, 0)),
         )
         .show(ui, |ui| {
@@ -32,11 +34,11 @@ pub fn draw(ui: &mut Ui, model: &OverlayModel<'_>) {
                     egui::Stroke::new(1.5, model.color.gamma_multiply(0.35)),
                 );
                 ui.add_space(4.0);
-                ui.label(RichText::new(model.title).size(15.0).strong().color(TEXT));
+                ui.label(neu::text(model.title, 15.0, Weight::Bold, p.text));
                 if !model.detail.is_empty() {
                     ui.add_space(6.0);
                     ui.add(
-                        egui::Label::new(RichText::new(model.detail).size(13.5).color(MUTED))
+                        egui::Label::new(neu::text(model.detail, 13.0, Weight::Regular, p.muted))
                             .truncate(),
                     );
                 }

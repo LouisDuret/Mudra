@@ -19,6 +19,7 @@ use mudra_config::{Config, Control, InternalOp, Level};
 use mudra_gestures::EngineState;
 use mudra_gestures::custom::CustomPose;
 use mudra_gestures::engine::Reason;
+use mudra_gestures::motion::CustomMove;
 use notify::{RecursiveMode, Watcher};
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
@@ -209,6 +210,8 @@ struct App {
     record: RecordForm,
     /// Poses personnalisées chargées, pour l'onglet « Gestes ».
     custom: Vec<CustomPose>,
+    /// Mouvements personnalisés chargés.
+    moves: Vec<CustomMove>,
     /// Gestes des classifieurs chargés, pour l'onglet « Gestes ».
     known: mudra_config::KnownGestures,
     tab: Tab,
@@ -261,6 +264,7 @@ pub fn run(config_path: PathBuf, explicit: bool, options: RunOptions) -> Result<
             )
         }
     };
+    theme::set(config.general.theme);
     let _log = platform::init_logging(&config.general.log_level, cfg!(debug_assertions));
     tracing::info!(version = env!("CARGO_PKG_VERSION"), config = %config_path.display(), "démarrage de Mudra");
 
@@ -315,7 +319,7 @@ pub fn run(config_path: PathBuf, explicit: bool, options: RunOptions) -> Result<
         overlay: None,
         overlay_title: String::new(),
         overlay_detail: String::new(),
-        overlay_color: theme::MUTED,
+        overlay_color: theme::palette().muted,
         overlay_hide_at: None,
         overlay_wanted: false,
         started: Instant::now(),
@@ -325,6 +329,7 @@ pub fn run(config_path: PathBuf, explicit: bool, options: RunOptions) -> Result<
         log: VecDeque::with_capacity(128),
         record: RecordForm::default(),
         custom: Vec::new(),
+        moves: Vec::new(),
         known,
         tab: Tab::default(),
         gestures: GesturesState::default(),
@@ -365,7 +370,11 @@ impl App {
         self.show_overlay(
             if error { "Attention" } else { "Mudra" }.to_string(),
             text,
-            if error { theme::RED } else { theme::MUTED },
+            if error {
+                theme::palette().danger
+            } else {
+                theme::palette().muted
+            },
             Some(Duration::from_secs(if error { 5 } else { 3 })),
         );
     }
@@ -636,10 +645,22 @@ impl App {
             preview.window.window().focus_window();
             return;
         }
+        // Taille des maquettes, réduite si l'écran est plus petit : la place
+        // de la barre de titre et de la barre des tâches est gardée.
+        let minimum: LogicalSize<f64> = LogicalSize::new(1040.0, 680.0);
+        let mut size: LogicalSize<f64> = LogicalSize::new(1280.0, 960.0);
+        if let Some(monitor) = event_loop
+            .primary_monitor()
+            .or_else(|| event_loop.available_monitors().next())
+        {
+            let screen: LogicalSize<f64> = monitor.size().to_logical(monitor.scale_factor());
+            size.width = size.width.min(screen.width - 40.0).max(minimum.width);
+            size.height = size.height.min(screen.height - 110.0).max(minimum.height);
+        }
         let attributes = Window::default_attributes()
-            .with_title("Mudra — aperçu")
-            .with_inner_size(LogicalSize::new(1180.0, 720.0))
-            .with_min_inner_size(LogicalSize::new(820.0, 520.0));
+            .with_title("Mudra")
+            .with_inner_size(size)
+            .with_min_inner_size(minimum);
         match EguiWindow::new(event_loop, attributes) {
             Ok(window) => {
                 self.preview = Some(PreviewWindow {
@@ -705,13 +726,14 @@ impl App {
             record: &mut self.record,
             known: &self.known,
             custom: &self.custom,
+            moves: &self.moves,
             tab: &mut self.tab,
             gestures: &mut self.gestures,
         };
         let mut actions = Vec::new();
-        preview
-            .window
-            .paint(theme::PANEL, |ui| actions = preview::draw(ui, &mut model));
+        preview.window.paint(theme::palette().bg, |ui| {
+            actions = preview::draw(ui, &mut model)
+        });
         for action in actions {
             self.ui_action(action);
         }
@@ -728,19 +750,31 @@ impl App {
         };
         overlay
             .window
-            .paint(theme::PANEL, |ui| overlay::draw(ui, &model));
+            .paint(theme::palette().bg, |ui| overlay::draw(ui, &model));
     }
 
     // ----- Poses personnalisées -----
 
-    /// Relit les poses perso du disque et donne leurs noms à l'interface.
+    /// Relit les poses et les mouvements perso du disque et donne leurs noms
+    /// à l'interface.
     fn load_custom(&mut self) {
         let (poses, notices) = mudra_gestures::custom::load_dir(&crate::custom::dir());
-        for notice in notices {
+        let (moves, move_notices) = mudra_gestures::motion::load_dir(&crate::custom::moves_dir());
+        for notice in notices.into_iter().chain(move_notices) {
             self.log(LogKind::Error, notice);
         }
-        theme::set_custom_names(poses.iter().map(|p| (p.label.as_str(), p.name.as_str())));
+        theme::set_custom_names(
+            poses
+                .iter()
+                .map(|p| (p.label.as_str(), p.name.as_str()))
+                .chain(moves.iter().map(|m| (m.label.as_str(), m.name.as_str()))),
+        );
         self.custom = poses;
+        self.moves = moves;
+    }
+
+    fn is_move(&self, label: &str) -> bool {
+        self.moves.iter().any(|m| m.label == label)
     }
 
     /// Après une modification des poses perso : les classifieurs et la liste
@@ -754,7 +788,7 @@ impl App {
         }
     }
 
-    fn train_take(&mut self, label: String) {
+    fn train_take(&mut self, label: String, movement: bool) {
         let Some(pipeline) = &self.pipeline else {
             if let Some(trainer) = &mut self.gestures.trainer {
                 trainer.error = Some("Mudra n'est pas démarré.".into());
@@ -766,11 +800,52 @@ impl App {
         self.record.status = Some(("Prépare-toi…".into(), false));
         pipeline.send(Command::Record(RecordRequest {
             label,
-            kind: RecordKind::Static {
-                seconds: crate::custom::TAKE_SECONDS,
+            // Un mouvement : un seul clip, le temps de faire le geste une fois.
+            kind: if movement {
+                RecordKind::Dynamic {
+                    reps: 1,
+                    seconds: crate::custom::MOVE_TAKE_SECONDS,
+                }
+            } else {
+                RecordKind::Static {
+                    seconds: crate::custom::TAKE_SECONDS,
+                }
             },
             dataset_root: crate::custom::dataset_root(),
         }));
+    }
+
+    /// Apprend un mouvement perso à partir de ses prises.
+    fn train_move(&mut self, label: String, name: Option<String>) {
+        let created = name.is_some();
+        let trained = crate::custom::train_move_in(
+            &crate::custom::dir(),
+            &label,
+            name.as_deref(),
+            &self.config,
+        );
+        match trained {
+            Ok(learnt) => {
+                self.gestures.trainer = None;
+                self.reload_custom();
+                self.log(
+                    LogKind::Info,
+                    format!(
+                        "Mouvement « {} » appris sur {} prises",
+                        learnt.name,
+                        learnt.takes()
+                    ),
+                );
+                if created {
+                    // Un mouvement sans action ne sert à rien : le formulaire s'ouvre.
+                    self.gestures.open_new_binding(&label, false, None);
+                }
+            }
+            Err(e) => match &mut self.gestures.trainer {
+                Some(trainer) => trainer.error = Some(e),
+                None => self.notice(e, true),
+            },
+        }
     }
 
     fn train_finish(&mut self, label: String, name: Option<String>, two_hands: bool) {
@@ -813,6 +888,13 @@ impl App {
         }
     }
 
+    fn edit_move(&mut self, label: &str, edit: impl FnOnce(&mut CustomMove)) {
+        match crate::custom::update_move_in(&crate::custom::dir(), label, edit) {
+            Ok(()) => self.reload_custom(),
+            Err(e) => self.gestures.error = Some(e),
+        }
+    }
+
     fn edit_pose(&mut self, label: &str, edit: impl FnOnce(&mut CustomPose)) {
         match crate::custom::update_in(&crate::custom::dir(), label, edit) {
             Ok(()) => self.reload_custom(),
@@ -820,7 +902,8 @@ impl App {
         }
     }
 
-    /// Supprime une pose perso, ses prises et les actions qui l'utilisent.
+    /// Supprime une pose ou un mouvement perso, ses prises et les actions qui
+    /// l'utilisent.
     fn delete_pose(&mut self, label: &str) {
         let activation = &self.config.activation;
         let reserved = activation.wake_gesture == label
@@ -852,10 +935,21 @@ impl App {
         // Rétablir ces actions sans la pose donnerait une configuration invalide.
         self.undo_text = None;
         self.gestures.can_undo = false;
-        match crate::custom::delete_in(&crate::custom::dir(), label) {
+        let (deleted, message) = if self.is_move(label) {
+            (
+                crate::custom::delete_move_in(&crate::custom::dir(), label),
+                format!("Mouvement « {label} » supprimé"),
+            )
+        } else {
+            (
+                crate::custom::delete_in(&crate::custom::dir(), label),
+                format!("Pose « {label} » supprimée"),
+            )
+        };
+        match deleted {
             Ok(()) => {
                 self.reload_custom();
-                self.log(LogKind::Info, format!("Pose « {label} » supprimée"));
+                self.log(LogKind::Info, message);
             }
             Err(e) => self.gestures.error = Some(e),
         }
@@ -904,6 +998,31 @@ impl App {
                 self.reload_config(false);
             }
             Err(e) => self.notice(e, true),
+        }
+    }
+
+    /// Met le thème en service dans les fenêtres ouvertes.
+    fn show_theme(&mut self, theme: mudra_config::Theme) {
+        theme::set(theme);
+        if let Some(preview) = &self.preview {
+            preview.window.apply_theme();
+        }
+        if let Some(overlay) = &self.overlay {
+            overlay.window.apply_theme();
+        }
+    }
+
+    /// Bouton de la barre du haut : change de thème tout de suite, et garde
+    /// le choix dans la configuration sans rien recharger d'autre.
+    fn toggle_theme(&mut self) {
+        let theme = theme::current().toggled();
+        self.show_theme(theme);
+        match self.write_edit(&ConfigEdit::Theme(theme)) {
+            Ok(_) => Arc::make_mut(&mut self.config).general.theme = theme,
+            Err(e) => self.log(
+                LogKind::Error,
+                format!("Thème non enregistré dans la configuration : {e}"),
+            ),
         }
     }
 
@@ -999,17 +1118,34 @@ impl App {
                     pipeline.send(Command::Lock);
                 }
             }
-            UiAction::TrainTake { label } => self.train_take(label),
+            UiAction::TrainTake { label, movement } => self.train_take(label, movement),
             UiAction::TrainFinish {
                 label,
                 name,
                 two_hands,
-            } => self.train_finish(label, name, two_hands),
+                movement,
+            } => {
+                if movement {
+                    self.train_move(label, name);
+                } else {
+                    self.train_finish(label, name, two_hands);
+                }
+            }
             UiAction::DiscardTakes(files) => crate::custom::discard_takes(&files),
             UiAction::SetPoseSensitivity { label, value } => {
-                self.edit_pose(&label, |pose| pose.sensitivity = value);
+                if self.is_move(&label) {
+                    self.edit_move(&label, |learnt| learnt.sensitivity = value);
+                } else {
+                    self.edit_pose(&label, |pose| pose.sensitivity = value);
+                }
             }
-            UiAction::RenamePose { label, name } => self.edit_pose(&label, |pose| pose.name = name),
+            UiAction::RenamePose { label, name } => {
+                if self.is_move(&label) {
+                    self.edit_move(&label, |learnt| learnt.name = name);
+                } else {
+                    self.edit_pose(&label, |pose| pose.name = name);
+                }
+            }
             UiAction::DeletePose(label) => self.delete_pose(&label),
             UiAction::RemoveExamples(label) => self.remove_examples(&label),
             UiAction::CancelRecording => {
@@ -1020,6 +1156,7 @@ impl App {
             UiAction::ReloadConfig => self.reload_config(true),
             UiAction::RefreshCameras => self.refresh_cameras(),
             UiAction::SelectCamera(device) => self.select_camera(device),
+            UiAction::ToggleTheme => self.toggle_theme(),
             UiAction::OpenConfigFolder => {
                 if let Some(dir) = self.config_path.parent() {
                     platform::open_path(dir);
@@ -1081,6 +1218,9 @@ impl App {
         }
         if !self.config.general.overlay {
             self.hide_overlay();
+        }
+        if old.general.theme != self.config.general.theme {
+            self.show_theme(self.config.general.theme);
         }
         let needs_restart = old.camera != self.config.camera
             || old.inference != self.config.inference
@@ -1218,6 +1358,7 @@ impl App {
     }
 
     fn on_record_event(&mut self, event: RecordEvent) {
+        let movement = self.gestures.trainer.as_ref().is_some_and(|t| t.movement);
         let form = &mut self.record;
         match event {
             RecordEvent::Countdown { seconds_left, .. } => {
@@ -1227,7 +1368,12 @@ impl App {
             }
             RecordEvent::Go { .. } => {
                 form.banner = Some(("⏺".into(), Instant::now()));
-                form.status = Some(("Tiens la pose…".into(), false));
+                let cue = if movement {
+                    "Fais le mouvement…"
+                } else {
+                    "Tiens la pose…"
+                };
+                form.status = Some((cue.into(), false));
             }
             RecordEvent::Progress { fraction, .. } => {
                 form.progress = Some(fraction);
@@ -1240,6 +1386,17 @@ impl App {
                 let Some(trainer) = &mut self.gestures.trainer else {
                     return;
                 };
+                if trainer.movement {
+                    // Une prise sans geste net ne peut pas servir d'exemple.
+                    match crate::custom::move_take_problem(&path) {
+                        Some(problem) => {
+                            crate::custom::discard_takes(&[path]);
+                            trainer.error = Some(problem);
+                        }
+                        None => trainer.takes.push(path),
+                    }
+                    return;
+                }
                 // À deux mains, seules comptent les images où les deux sont visibles.
                 let seen = if trainer.two_hands {
                     crate::custom::read_pair_take(&path).map_or(0, |pairs| pairs.len())

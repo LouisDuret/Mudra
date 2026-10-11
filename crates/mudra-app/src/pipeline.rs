@@ -20,6 +20,7 @@ use mudra_dataset::{FrameRecord, SessionHeader, SessionKind, SessionWriter};
 use mudra_gestures::builtin::{BuiltinDynamicClassifier, BuiltinStaticClassifier};
 use mudra_gestures::custom::CustomStaticClassifier;
 use mudra_gestures::engine::Reason;
+use mudra_gestures::motion::CustomDynamicClassifier;
 use mudra_gestures::onnx::{OnnxDynamicClassifier, OnnxStaticClassifier};
 use mudra_gestures::stage::{GestureStage, HandInput, HandView};
 use mudra_gestures::{
@@ -55,8 +56,8 @@ pub struct Options {
 pub enum RecordKind {
     /// Capture continue pendant `seconds`.
     Static { seconds: f32 },
-    /// `reps` répétitions guidées, un clip de 1,0 s chacune.
-    Dynamic { reps: u32 },
+    /// `reps` répétitions guidées, un clip de `seconds` chacune.
+    Dynamic { reps: u32, seconds: f32 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -256,7 +257,8 @@ impl Drop for Pipeline {
     }
 }
 
-/// Charge les classifieurs configurés, complétés par les poses perso.
+/// Charge les classifieurs configurés, complétés par les poses et les
+/// mouvements perso.
 pub fn load_classifiers(
     config: &Config,
 ) -> (
@@ -271,6 +273,13 @@ pub fn load_classifiers(
         static_classifier
     } else {
         Box::new(CustomStaticClassifier::new(static_classifier, &poses))
+    };
+    let (moves, move_notices) = mudra_gestures::motion::load_dir(&crate::custom::moves_dir());
+    notices.extend(move_notices);
+    let dynamic_classifier: Box<dyn DynamicClassifier> = if moves.is_empty() {
+        dynamic_classifier
+    } else {
+        Box::new(CustomDynamicClassifier::new(dynamic_classifier, &moves))
     };
     (static_classifier, dynamic_classifier, notices)
 }
@@ -430,7 +439,8 @@ struct Recorder {
 
 const STATIC_COUNTDOWN_US: u64 = 3_000_000;
 const DYNAMIC_COUNTDOWN_US: u64 = 2_000_000;
-const CLIP_US: u64 = 1_000_000;
+/// Durée d'un clip de `mudra record --dynamic`, en secondes.
+pub const CLIP_SECONDS: f32 = 1.0;
 const REST_US: u64 = 600_000;
 
 struct Worker {
@@ -1016,7 +1026,11 @@ impl Worker {
             .unwrap_or_default();
         let (clips, countdown) = match &request.kind {
             RecordKind::Static { .. } => (None, STATIC_COUNTDOWN_US),
-            RecordKind::Dynamic { reps } => (Some(*reps), DYNAMIC_COUNTDOWN_US),
+            RecordKind::Dynamic { reps, .. } => (Some(*reps), DYNAMIC_COUNTDOWN_US),
+        };
+        let clip_seconds = match &request.kind {
+            RecordKind::Static { .. } => None,
+            RecordKind::Dynamic { seconds, .. } => Some(*seconds),
         };
         let header = SessionHeader {
             format_version: mudra_dataset::FORMAT_VERSION,
@@ -1044,7 +1058,7 @@ impl Worker {
             mirror: self.config.camera.mirror,
             created_at: String::new(),
             clips,
-            clip_seconds: clips.map(|_| CLIP_US as f32 * 1e-6),
+            clip_seconds,
         };
         match SessionWriter::create(&request.dataset_root, header) {
             Ok(writer) => {
@@ -1081,7 +1095,7 @@ impl Worker {
             return;
         };
         let clip_info = match recorder.kind {
-            RecordKind::Dynamic { reps } => Some((recorder.clip, reps)),
+            RecordKind::Dynamic { reps, .. } => Some((recorder.clip, reps)),
             RecordKind::Static { .. } => None,
         };
         let mut event = None;
@@ -1094,7 +1108,7 @@ impl Worker {
                 if now >= *until_us {
                     let duration = match recorder.kind {
                         RecordKind::Static { seconds } => (seconds.max(0.5) * 1e6) as u64,
-                        RecordKind::Dynamic { .. } => CLIP_US,
+                        RecordKind::Dynamic { seconds, .. } => (seconds.max(0.2) * 1e6) as u64,
                     };
                     recorder.phase = RecordPhase::Capturing {
                         since_us: now,
@@ -1117,7 +1131,7 @@ impl Worker {
             RecordPhase::Capturing { since_us, until_us } => {
                 if now >= *until_us {
                     match recorder.kind {
-                        RecordKind::Dynamic { reps } if recorder.clip < reps => {
+                        RecordKind::Dynamic { reps, .. } if recorder.clip < reps => {
                             recorder.clip += 1;
                             recorder.phase = RecordPhase::Rest {
                                 until_us: now + REST_US,
@@ -1127,12 +1141,11 @@ impl Worker {
                     }
                 } else if now.saturating_sub(recorder.last_progress_us) >= 500_000 {
                     recorder.last_progress_us = now;
+                    let within = (now - *since_us) as f32 / (*until_us - *since_us).max(1) as f32;
                     let fraction = match recorder.kind {
-                        RecordKind::Static { .. } => {
-                            (now - *since_us) as f32 / (*until_us - *since_us).max(1) as f32
-                        }
-                        RecordKind::Dynamic { reps } => {
-                            (recorder.clip - 1) as f32 / reps.max(1) as f32
+                        RecordKind::Static { .. } => within,
+                        RecordKind::Dynamic { reps, .. } => {
+                            ((recorder.clip - 1) as f32 + within) / reps.max(1) as f32
                         }
                     };
                     event = Some(RecordEvent::Progress {

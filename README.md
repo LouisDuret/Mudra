@@ -61,7 +61,7 @@ GitHub Actions et publie les deux fichiers dans une Release.
 |---|---|---|
 | Pause | grise | rien ; la caméra est libérée (voyant éteint) |
 | Verrouillé | anneau clair | seulement le geste de réveil |
-| Armé | bleue | tous les gestes ; retour à Verrouillé après 4 s sans action |
+| Armé | ambre | tous les gestes ; retour à Verrouillé après 4 s sans action |
 | Continu | verte | un contrôle continu (volume, souris) suit la main |
 
 Gestes livrés par défaut (Annexe B du cahier des charges) :
@@ -86,6 +86,14 @@ configuration et de journaux. Un petit overlay en bas de l'écran rappelle
 l'état quand le moteur est armé et annonce chaque action.
 
 ![Overlay d'état](docs/images/overlay.png)
+
+La fenêtre a deux onglets. **Aperçu** montre l'image de la caméra avec les
+points-clés des mains, l'état du moteur, ce que chaque main fait (poses les
+plus probables, maintien en cours), les performances et le journal.
+**Gestes** règle les actions ; une vignette y reste visible, qui dessine le
+squelette des mains suivies sans l'image de la caméra. Le bouton soleil / lune
+de la barre du haut passe du thème sombre au thème clair : le choix est gardé
+dans la configuration (`theme = "dark"` ou `"light"`, section `[general]`).
 
 Pendant le contrôle de la souris, un halo vert suit le curseur (`halo = false`
 dans le contrôle `mouse` pour le retirer). Le curseur est stabilisé : les sauts
@@ -129,6 +137,8 @@ action = { type = "launch", path = 'C:\Program Files\Mozilla Firefox\firefox.exe
 gesture = "three_fingers"
 action = { type = "keys", combo = "Win+D" }
 ```
+
+![Onglet Gestes, thème clair](docs/images/gestes.png)
 
 Le plus simple est l'onglet **Gestes** de la fenêtre : il liste tous les
 gestes connus, montre celui que tu fais en ce moment, et permet d'associer,
@@ -176,8 +186,9 @@ forme de main qui t'appartient :
 
 1. donne-lui un nom (« Téléphone ») ;
 2. fais trois prises de quatre secondes, guidées par un compte à rebours, en
-   reformant la pose et en l'inclinant un peu d'une prise à l'autre. La caméra
-   s'affiche en vignette pour vérifier que ta main est bien suivie ;
+   reformant la pose et en l'inclinant un peu d'une prise à l'autre. La
+   vignette « Aperçu », à droite, montre le squelette de ta main pour vérifier
+   qu'elle est bien suivie ;
 3. **Créer la pose** : elle rejoint la liste et le formulaire d'action s'ouvre.
 
 La pose s'ajoute aux gestes existants, sans Python ni ré-entraînement : Mudra
@@ -212,16 +223,44 @@ faut compléter, ou la sensibilité de tes exemples qu'il faut resserrer.
 
 Les poses vivent dans `%APPDATA%\Mudra\gestures\` : un fichier `.json` par
 pose (ou par geste de base complété) et ses prises dans `dataset\`, au format
-de `mudra record`. Seuls les points-clés sont stockés, jamais d'images. Les
-mouvements ne s'apprennent pas encore de cette façon.
+de `mudra record`. Seuls les points-clés sont stockés, jamais d'images.
+
+### Un mouvement à toi, depuis l'application
+
+Le bouton **+ Nouveau mouvement** fait la même chose pour un geste bref : un
+cercle, un va-et-vient, la main qu'on avance vers l'écran.
+
+1. donne-lui un nom (« Cercle ») ;
+2. fais trois prises : après le compte à rebours, tu as deux secondes pour
+   faire le mouvement une fois, franchement, puis garder la main immobile.
+   Une prise où Mudra ne voit pas de geste net n'est pas gardée ;
+3. **Créer le mouvement** : il rejoint la liste et le formulaire d'action
+   s'ouvre.
+
+Mudra retient la trajectoire de la main (son chemin, son rapprochement de la
+caméra) et l'ouverture des doigts pendant le geste, puis compare en direct la
+fin de ce que fait ta main à tes exemples, à plusieurs vitesses. Le seuil se
+règle seul sur l'écart entre tes prises ; la carte a la même jauge, la même
+sensibilité et les mêmes boutons qu'une pose perso. À savoir :
+
+- un mouvement dure moins de 1,2 s et couvre plus d'une paume ;
+- la forme de la main compte : le même trajet, poing fermé ou main ouverte,
+  fait deux mouvements différents ;
+- un mouvement qui commence comme un balayage (main ouverte, trait droit)
+  laisse partir le balayage d'abord, s'il a une action : la carte le signale.
+  Fais-le main fermée, ou choisis un trajet plus distinct ;
+- comme les balayages, il n'agit qu'une fois Mudra armé.
+
+Les mouvements vivent dans `%APPDATA%\Mudra\gestures\movements\`, un fichier
+`.json` chacun, et leurs prises dans `dataset\dynamic\`.
 
 ### Ré-entraîner les classifieurs (avancé)
 
 Tant que `models/static_gestures.onnx` et `models/dynamic_gestures.onnx`
 n'existent pas, Mudra utilise des **classifieurs géométriques intégrés** (règles
-sur les points-clés), qui connaissent les gestes ci-dessus. Pour un mouvement à
-toi, ou pour une reconnaissance entièrement calée sur ta main, entraîne les
-classifieurs sur tes données. Mets d'abord Mudra en pause (la caméra ne se
+sur les points-clés), qui connaissent les gestes ci-dessus. Pour une
+reconnaissance entièrement calée sur ta main, entraîne les classifieurs sur
+tes données. Mets d'abord Mudra en pause (la caméra ne se
 partage pas).
 
 ```powershell
@@ -307,6 +346,10 @@ Fait et vérifié sur la machine cible (i7-10700K, RTX 3070, StreamCam) :
 - La reconnaissance en conditions réelles. Les classifieurs intégrés sont calés
   sur quatre photos et des mains de synthèse ; les seuils (`[defaults]`) et le
   lissage se règlent dans l'aperçu.
+- Les mouvements perso : l'apprentissage et la reconnaissance sont vérifiés
+  sur des trajectoires de synthèse (cercle, va-et-vient), pas encore sur une
+  vraie main. Si un mouvement part mal ou trop, sa sensibilité se règle sur
+  sa carte.
 - Les critères de durée : une heure sans déclenchement involontaire (CA-05),
   huit heures sans dérive (CA-10), débranchement réel de la webcam (CA-07).
 

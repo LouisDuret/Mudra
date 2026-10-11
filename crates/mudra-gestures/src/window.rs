@@ -64,21 +64,24 @@ impl SlidingWindow {
         self.samples.push_back((t_us, sample));
     }
 
-    /// Ré-échantillonne les `window_len` derniers instants dans `out`.
-    /// Renvoie `false` si l'historique ne couvre pas encore toute la fenêtre.
-    pub fn resample(&self, out: &mut Vec<WindowSample>) -> bool {
+    /// Ré-échantillonne les derniers instants dans `out` : `window_len` si
+    /// l'historique les couvre, sinon ceux qu'il couvre. Renvoie `false` s'il
+    /// y en a moins de `min_len`.
+    pub fn resample(&self, min_len: usize, out: &mut Vec<WindowSample>) -> bool {
         out.clear();
         let (Some(&(first, _)), Some(&(last, _))) = (self.samples.front(), self.samples.back())
         else {
             return false;
         };
-        let start = last as f64 - (self.window_len - 1) as f64 * self.period_us;
         // Tolérance d'une demi-période sur le début de la fenêtre.
-        if (first as f64) > start + self.period_us * 0.5 {
+        let covered = ((last - first) as f64 / self.period_us + 0.5).floor() as usize + 1;
+        let len = covered.min(self.window_len);
+        if len < min_len.clamp(2, self.window_len) {
             return false;
         }
+        let start = last as f64 - (len - 1) as f64 * self.period_us;
         let mut cursor = 0;
-        for i in 0..self.window_len {
+        for i in 0..len {
             let t = start + i as f64 * self.period_us;
             while cursor + 1 < self.samples.len() && (self.samples[cursor + 1].0 as f64) < t {
                 cursor += 1;
@@ -97,7 +100,7 @@ impl SlidingWindow {
     }
 }
 
-fn lerp(a: &WindowSample, b: &WindowSample, w: f32) -> WindowSample {
+pub(crate) fn lerp(a: &WindowSample, b: &WindowSample, w: f32) -> WindowSample {
     let mut out = *a;
     for i in 0..a.image.len() {
         for c in 0..3 {
@@ -125,10 +128,10 @@ mod tests {
         let mut out = Vec::new();
         for i in 0..31u64 {
             w.push(i * 16_667, sample(i as f32));
-            assert!(!w.resample(&mut out), "trame {i}");
+            assert!(!w.resample(32, &mut out), "trame {i}");
         }
         w.push(31 * 16_667, sample(31.0));
-        assert!(w.resample(&mut out));
+        assert!(w.resample(32, &mut out));
         assert_eq!(out.len(), 32);
         assert!((out[0].image[0][0] - 0.0).abs() < 0.05);
         assert!((out[31].image[0][0] - 31.0).abs() < 1e-4);
@@ -143,7 +146,7 @@ mod tests {
             w.push(t, sample(t as f32 * 1e-6));
         }
         let mut out = Vec::new();
-        assert!(w.resample(&mut out));
+        assert!(w.resample(32, &mut out));
         let last_t = 39.0 * 33_333.0 * 1e-6;
         for (i, s) in out.iter().enumerate() {
             let expected = last_t - (31 - i) as f32 / 60.0;
@@ -158,9 +161,31 @@ mod tests {
             w.push(i * 16_667, sample(0.0));
         }
         let mut out = Vec::new();
-        assert!(w.resample(&mut out));
+        assert!(w.resample(8, &mut out));
         w.push(20 * 16_667 + 400_000, sample(0.0));
-        assert!(!w.resample(&mut out));
+        assert!(!w.resample(8, &mut out));
+    }
+
+    #[test]
+    fn a_partial_window_is_served_from_its_minimum_length() {
+        // Fenêtre de 64 instants, utilisable dès 32.
+        let mut w = SlidingWindow::new(64, 60.0);
+        let mut out = Vec::new();
+        for i in 0..40u64 {
+            w.push(i * 16_667, sample(i as f32));
+            assert_eq!(w.resample(32, &mut out), i >= 31, "trame {i}");
+        }
+        // Les 40 instants couverts, le plus récent en dernier.
+        assert_eq!(out.len(), 40);
+        assert!((out[0].image[0][0] - 0.0).abs() < 0.05);
+        assert!((out[39].image[0][0] - 39.0).abs() < 1e-4);
+        for i in 40..100u64 {
+            w.push(i * 16_667, sample(i as f32));
+        }
+        assert!(w.resample(32, &mut out));
+        assert_eq!(out.len(), 64);
+        assert!((out[63].image[0][0] - 99.0).abs() < 1e-4);
+        assert!((out[0].image[0][0] - 36.0).abs() < 0.05);
     }
 
     #[test]

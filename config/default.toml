@@ -7,6 +7,7 @@ allow_commands = false            # active l'action "command" (ENF-22)
 sounds = true                     # retours sonores (sons système, EF-36)
 overlay = true                    # petit overlay d'état au premier plan (EF-37)
 autostart = false                 # lancement à l'ouverture de session (EF-74)
+theme = "dark"                    # "dark" (sombre) ou "light" (clair)
 
 [camera]
 device = "auto"                   # "auto", sous-chaîne du nom, ou index (0, 1…)

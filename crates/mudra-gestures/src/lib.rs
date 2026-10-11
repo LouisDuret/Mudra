@@ -8,6 +8,7 @@ pub mod builtin;
 pub mod custom;
 pub mod engine;
 pub mod geometry;
+pub mod motion;
 pub mod one_euro;
 pub mod onnx;
 pub mod stabilizer;
@@ -96,8 +97,14 @@ pub trait DynamicClassifier: Send {
     fn labels(&self) -> &[String];
     /// Nombre de trames T de la fenêtre.
     fn window_len(&self) -> usize;
+    /// Nombre de trames à partir duquel `classify` peut être appelé, tant
+    /// que l'historique ne couvre pas encore toute la fenêtre.
+    fn min_window_len(&self) -> usize {
+        self.window_len()
+    }
     fn sample_rate_hz(&self) -> f32;
-    /// `window` contient exactement `window_len()` échantillons, du plus ancien au plus récent.
+    /// `window` contient de `min_window_len()` à `window_len()` échantillons,
+    /// du plus ancien au plus récent.
     fn classify(
         &mut self,
         window: &[window::WindowSample],

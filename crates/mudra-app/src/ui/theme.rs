@@ -1,98 +1,321 @@
-//! Thème sombre de Mudra.
+//! Thèmes de Mudra : palette neumorphique sombre (par défaut) et claire,
+//! polices, et styles des widgets egui restés d'origine.
 
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use egui::{Color32, CornerRadius, FontFamily, FontId, Stroke, TextStyle, Visuals};
+use mudra_config::Theme;
 use mudra_gestures::EngineState;
 
-pub const BACKGROUND: Color32 = Color32::from_rgb(0x0D, 0x0F, 0x14);
-pub const PANEL: Color32 = Color32::from_rgb(0x13, 0x17, 0x1E);
-pub const CARD: Color32 = Color32::from_rgb(0x1A, 0x1F, 0x29);
-pub const CARD_HOVER: Color32 = Color32::from_rgb(0x22, 0x29, 0x35);
-pub const BORDER: Color32 = Color32::from_rgb(0x2A, 0x31, 0x3D);
-pub const TEXT: Color32 = Color32::from_rgb(0xE6, 0xEA, 0xF0);
-pub const MUTED: Color32 = Color32::from_rgb(0x8B, 0x95, 0xA5);
-pub const ACCENT: Color32 = Color32::from_rgb(0x5B, 0x9D, 0xFF);
-pub const GREEN: Color32 = Color32::from_rgb(0x3D, 0xD6, 0x8C);
-pub const AMBER: Color32 = Color32::from_rgb(0xF5, 0xB7, 0x4E);
-pub const RED: Color32 = Color32::from_rgb(0xF2, 0x61, 0x6A);
-pub const GRAY: Color32 = Color32::from_rgb(0x6B, 0x74, 0x80);
+/// Couleurs d'un thème. Les surfaces ont toutes la couleur du fond : le
+/// relief vient de l'ombre (`shade`) et du reflet (`shine`).
+pub struct Palette {
+    pub bg: Color32,
+    pub text: Color32,
+    /// Texte secondaire.
+    pub soft: Color32,
+    pub muted: Color32,
+    /// Ombre et reflet des surfaces en relief.
+    pub shade: Color32,
+    pub shine: Color32,
+    /// Ombre des creux.
+    pub hollow: Color32,
+    /// Texte et icônes d'accent, lisibles sur le fond.
+    pub accent: Color32,
+    pub danger: Color32,
+    pub ok: Color32,
+    /// Bouton des interrupteurs et son ombre portée.
+    pub knob: Color32,
+    pub knob_shade: Color32,
+    /// Curseur de sensibilité.
+    pub handle: Color32,
+    pub handle_shade: Color32,
+    /// Cuvette de la vignette de l'onglet « Gestes ».
+    pub well: Color32,
+    pub well_shade: Color32,
+    pub well_shine: Color32,
+    /// Rail de la jauge circulaire.
+    pub track: Color32,
+    /// Main en pointillé de la vignette vide.
+    pub ghost: Color32,
+    /// Pastille éteinte.
+    pub dot: Color32,
+    /// Ombre portée d'un segment sélectionné.
+    pub glow: Color32,
+}
 
-/// Couleur associée à un état du moteur, la même que celle de l'icône de notification.
-pub fn state_color(state: EngineState) -> Color32 {
-    match state {
-        EngineState::Paused => GRAY,
-        EngineState::Locked => MUTED,
-        EngineState::Armed => ACCENT,
-        EngineState::Continuous => GREEN,
+const DARK: Palette = Palette {
+    bg: Color32::from_rgb(0x26, 0x2A, 0x31),
+    text: Color32::from_rgb(0xE8, 0xEA, 0xEE),
+    soft: Color32::from_rgb(0xC3, 0xC8, 0xD1),
+    muted: Color32::from_rgb(0x9A, 0xA0, 0xAC),
+    shade: Color32::from_rgb(0x16, 0x18, 0x1D),
+    shine: Color32::from_rgb(0x32, 0x37, 0x41),
+    hollow: Color32::from_rgb(0x16, 0x18, 0x1D),
+    accent: Color32::from_rgb(0xF5, 0xB5, 0x2E),
+    danger: Color32::from_rgb(0xFF, 0x7A, 0x6B),
+    ok: Color32::from_rgb(0x5B, 0xD4, 0x8A),
+    knob: Color32::from_rgb(0xE8, 0xEA, 0xEE),
+    knob_shade: Color32::from_rgba_premultiplied(0, 0, 0, 140),
+    handle: Color32::from_rgb(0x3A, 0x3F, 0x49),
+    handle_shade: Color32::from_rgb(0x14, 0x16, 0x1A),
+    well: Color32::from_rgb(0x1E, 0x21, 0x27),
+    well_shade: Color32::from_rgb(0x14, 0x16, 0x1A),
+    well_shine: Color32::from_rgb(0x2C, 0x30, 0x39),
+    track: Color32::from_rgb(0x1A, 0x1C, 0x21),
+    ghost: Color32::from_rgb(0x5E, 0x64, 0x70),
+    dot: Color32::from_rgb(0x16, 0x18, 0x1D),
+    glow: Color32::from_rgba_premultiplied(0, 0, 0, 115),
+};
+
+const LIGHT: Palette = Palette {
+    bg: Color32::from_rgb(0xE6, 0xE9, 0xEF),
+    text: Color32::from_rgb(0x2B, 0x2F, 0x38),
+    soft: Color32::from_rgb(0x4A, 0x50, 0x5C),
+    muted: Color32::from_rgb(0x6B, 0x71, 0x80),
+    shade: Color32::from_rgb(0xC3, 0xC8, 0xD2),
+    shine: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+    hollow: Color32::from_rgb(0xC8, 0xCD, 0xD6),
+    accent: Color32::from_rgb(0xB4, 0x53, 0x09),
+    danger: Color32::from_rgb(0xB4, 0x23, 0x18),
+    ok: Color32::from_rgb(0x2F, 0x9E, 0x62),
+    knob: Color32::from_rgb(0xF2, 0xF4, 0xF7),
+    // rgba(120, 128, 145, 0.45), prémultiplié.
+    knob_shade: Color32::from_rgba_premultiplied(54, 58, 65, 115),
+    handle: Color32::from_rgb(0xEE, 0xF0, 0xF4),
+    handle_shade: Color32::from_rgb(0xBC, 0xC2, 0xCC),
+    well: Color32::from_rgb(0xDD, 0xE1, 0xE8),
+    well_shade: Color32::from_rgb(0xBF, 0xC5, 0xCF),
+    well_shine: Color32::from_rgb(0xFA, 0xFB, 0xFC),
+    track: Color32::from_rgb(0xD3, 0xD7, 0xDE),
+    ghost: Color32::from_rgb(0x9A, 0xA1, 0xAE),
+    dot: Color32::from_rgb(0xC3, 0xC8, 0xD2),
+    // rgba(214, 110, 20, 0.35), prémultiplié.
+    glow: Color32::from_rgba_premultiplied(75, 39, 7, 89),
+};
+
+/// Dégradé d'accent, commun aux deux thèmes, et texte posé dessus.
+pub const SUN: Color32 = Color32::from_rgb(0xF5, 0xB5, 0x2E);
+pub const ORANGE: Color32 = Color32::from_rgb(0xE8, 0x77, 0x1A);
+pub const ON_ACCENT: Color32 = Color32::from_rgb(0x2A, 0x16, 0x06);
+/// Ombre intérieure d'un interrupteur allumé : rgba(150, 70, 0, 0.35).
+pub const EMBER: Color32 = Color32::from_rgba_premultiplied(53, 25, 0, 89);
+
+/// Écran de la caméra : sombre dans les deux thèmes, comme l'image qu'il porte.
+pub const SCREEN: Color32 = Color32::from_rgb(0x1C, 0x1F, 0x25);
+/// Étiquette posée sur l'image : rgba(20, 22, 27, 0.72).
+pub const SCREEN_CHIP: Color32 = Color32::from_rgba_premultiplied(14, 16, 19, 184);
+pub const SCREEN_TEXT: Color32 = Color32::from_rgb(0xF2, 0xF4, 0xF7);
+pub const SCREEN_SOFT: Color32 = Color32::from_rgb(0xD9, 0xDC, 0xE2);
+pub const SCREEN_MUTED: Color32 = Color32::from_rgb(0x8E, 0x95, 0xA3);
+pub const SCREEN_LIVE: Color32 = Color32::from_rgb(0xFF, 0x6B, 0x5E);
+pub const SCREEN_OK: Color32 = Color32::from_rgb(0x5B, 0xD4, 0x8A);
+
+/// Couleurs fixes de l'icône de notification et du halo du curseur, posés
+/// sur le bureau et non sur une fenêtre de Mudra.
+pub const TRAY_PAUSED: Color32 = Color32::from_rgb(0x6B, 0x74, 0x80);
+pub const TRAY_LOCKED: Color32 = Color32::from_rgb(0xE6, 0xEA, 0xF0);
+pub const TRAY_ARMED: Color32 = Color32::from_rgb(0xF5, 0xB5, 0x2E);
+pub const TRAY_ERROR: Color32 = Color32::from_rgb(0xF2, 0x61, 0x6A);
+pub const GREEN: Color32 = Color32::from_rgb(0x3D, 0xD6, 0x8C);
+
+static LIGHT_THEME: AtomicBool = AtomicBool::new(false);
+
+/// Palette du thème en service.
+pub fn palette() -> &'static Palette {
+    if LIGHT_THEME.load(Ordering::Relaxed) {
+        &LIGHT
+    } else {
+        &DARK
     }
 }
 
-pub fn apply(ctx: &egui::Context) {
-    let mut visuals = Visuals::dark();
-    visuals.override_text_color = Some(TEXT);
-    visuals.panel_fill = PANEL;
-    visuals.window_fill = PANEL;
-    visuals.extreme_bg_color = BACKGROUND;
-    visuals.faint_bg_color = CARD;
-    visuals.code_bg_color = CARD;
-    visuals.window_stroke = Stroke::new(1.0, BORDER);
-    visuals.hyperlink_color = ACCENT;
-    visuals.selection.bg_fill = ACCENT.gamma_multiply(0.35);
-    visuals.selection.stroke = Stroke::new(1.0, ACCENT);
-    visuals.warn_fg_color = AMBER;
-    visuals.error_fg_color = RED;
+pub fn current() -> Theme {
+    if LIGHT_THEME.load(Ordering::Relaxed) {
+        Theme::Light
+    } else {
+        Theme::Dark
+    }
+}
 
-    let radius = CornerRadius::same(6);
-    let widgets = &mut visuals.widgets;
-    widgets.noninteractive.bg_fill = PANEL;
-    widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
-    widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT);
-    widgets.noninteractive.corner_radius = radius;
-    widgets.inactive.bg_fill = CARD;
-    widgets.inactive.weak_bg_fill = CARD;
-    widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER);
-    widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT);
-    widgets.inactive.corner_radius = radius;
-    widgets.hovered.bg_fill = CARD_HOVER;
-    widgets.hovered.weak_bg_fill = CARD_HOVER;
-    widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT.gamma_multiply(0.7));
-    widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::WHITE);
-    widgets.hovered.corner_radius = radius;
-    widgets.active.bg_fill = ACCENT.gamma_multiply(0.45);
-    widgets.active.weak_bg_fill = ACCENT.gamma_multiply(0.45);
-    widgets.active.bg_stroke = Stroke::new(1.0, ACCENT);
-    widgets.active.fg_stroke = Stroke::new(1.0, Color32::WHITE);
-    widgets.active.corner_radius = radius;
-    widgets.open.bg_fill = CARD_HOVER;
-    widgets.open.corner_radius = radius;
+/// Change de thème ; chaque fenêtre ouverte doit ensuite repasser par [`apply`].
+pub fn set(theme: Theme) {
+    LIGHT_THEME.store(theme == Theme::Light, Ordering::Relaxed);
+}
 
-    ctx.set_theme(egui::Theme::Dark);
-    ctx.set_visuals_of(egui::Theme::Dark, visuals);
+/// Couleur associée à un état du moteur.
+pub fn state_color(state: EngineState) -> Color32 {
+    let p = palette();
+    match state {
+        EngineState::Paused | EngineState::Locked => p.muted,
+        EngineState::Armed => ORANGE,
+        EngineState::Continuous => p.ok,
+    }
+}
+
+/// Graisses disponibles ; egui n'en a pas, chacune est une famille de police.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Weight {
+    Regular,
+    Semibold,
+    Bold,
+}
+
+const SEMIBOLD: &str = "semibold";
+const BOLD: &str = "bold";
+
+pub fn font(size: f32, weight: Weight) -> FontId {
+    let family = match weight {
+        Weight::Regular => FontFamily::Proportional,
+        Weight::Semibold => FontFamily::Name(SEMIBOLD.into()),
+        Weight::Bold => FontFamily::Name(BOLD.into()),
+    };
+    FontId::new(size, family)
+}
+
+pub fn mono(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Monospace)
+}
+
+/// Polices du système, en trois graisses, devant celles d'egui qui gardent
+/// les symboles. Une police absente laisse sa graisse retomber sur la suivante.
+fn fonts() -> egui::FontDefinitions {
+    let mut fonts = egui::FontDefinitions::default();
+    let dir = std::env::var_os("WINDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+        .join("Fonts");
+    let mut load = |name: &str, files: &[&str]| {
+        let bytes = files.iter().find_map(|f| std::fs::read(dir.join(f)).ok())?;
+        fonts
+            .font_data
+            .insert(name.to_owned(), Arc::new(egui::FontData::from_owned(bytes)));
+        Some(name.to_owned())
+    };
+    let regular = load("regular", &["segoeui.ttf"]);
+    let semibold = load(SEMIBOLD, &["seguisb.ttf", "segoeuib.ttf"]);
+    let bold = load(BOLD, &["segoeuib.ttf", "seguisb.ttf"]);
+    let mono = load("mono", &["CascadiaMono.ttf", "consola.ttf"]);
+
+    let base = fonts
+        .families
+        .get(&FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    let stack = |first: &[&Option<String>]| -> Vec<String> {
+        first
+            .iter()
+            .filter_map(|name| (*name).clone())
+            .chain(base.iter().cloned())
+            .collect()
+    };
+    fonts
+        .families
+        .insert(FontFamily::Proportional, stack(&[&regular]));
+    fonts.families.insert(
+        FontFamily::Name(SEMIBOLD.into()),
+        stack(&[&semibold, &regular]),
+    );
+    fonts
+        .families
+        .insert(FontFamily::Name(BOLD.into()), stack(&[&bold, &regular]));
+    if let Some(mono) = mono {
+        fonts
+            .families
+            .entry(FontFamily::Monospace)
+            .or_default()
+            .insert(0, mono);
+    }
+    fonts
+}
+
+/// Polices et espacements : une fois par fenêtre, à sa création.
+pub fn install(ctx: &egui::Context) {
+    ctx.set_fonts(fonts());
     ctx.all_styles_mut(|style| {
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
         style.spacing.button_padding = egui::vec2(10.0, 5.0);
+        style.spacing.interact_size.y = 24.0;
+        style.spacing.scroll = egui::style::ScrollStyle::floating();
+        style.interaction.selectable_labels = false;
         style.text_styles = [
-            (
-                TextStyle::Heading,
-                FontId::new(17.0, FontFamily::Proportional),
-            ),
-            (TextStyle::Body, FontId::new(13.5, FontFamily::Proportional)),
-            (
-                TextStyle::Button,
-                FontId::new(13.5, FontFamily::Proportional),
-            ),
-            (
-                TextStyle::Small,
-                FontId::new(11.5, FontFamily::Proportional),
-            ),
-            (
-                TextStyle::Monospace,
-                FontId::new(12.5, FontFamily::Monospace),
-            ),
+            (TextStyle::Heading, font(20.0, Weight::Bold)),
+            (TextStyle::Body, font(13.0, Weight::Regular)),
+            (TextStyle::Button, font(12.5, Weight::Semibold)),
+            (TextStyle::Small, font(11.5, Weight::Regular)),
+            (TextStyle::Monospace, mono(11.5)),
         ]
         .into();
     });
+    apply(ctx);
+}
+
+/// Couleurs du thème en service, pour les widgets egui d'origine (champs de
+/// saisie, listes déroulantes, infobulles, barres de défilement).
+pub fn apply(ctx: &egui::Context) {
+    let p = palette();
+    let light = current() == Theme::Light;
+    let mut visuals = if light {
+        Visuals::light()
+    } else {
+        Visuals::dark()
+    };
+    visuals.override_text_color = Some(p.text);
+    visuals.panel_fill = p.bg;
+    visuals.window_fill = p.bg;
+    visuals.extreme_bg_color = p.well;
+    visuals.faint_bg_color = p.well;
+    visuals.code_bg_color = p.well;
+    visuals.window_stroke = Stroke::new(1.0, p.shine);
+    visuals.window_corner_radius = CornerRadius::same(14);
+    visuals.menu_corner_radius = CornerRadius::same(14);
+    visuals.popup_shadow = egui::Shadow {
+        offset: [6, 8],
+        blur: 22,
+        spread: 0,
+        color: Color32::from_black_alpha(if light { 50 } else { 120 }),
+    };
+    visuals.hyperlink_color = p.accent;
+    visuals.selection.bg_fill = ORANGE.gamma_multiply(0.35);
+    visuals.selection.stroke = Stroke::new(1.0, p.accent);
+    visuals.warn_fg_color = p.accent;
+    visuals.error_fg_color = p.danger;
+
+    let radius = CornerRadius::same(9);
+    let widgets = &mut visuals.widgets;
+    widgets.noninteractive.bg_fill = p.bg;
+    widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.shade);
+    widgets.noninteractive.fg_stroke = Stroke::new(1.0, p.text);
+    widgets.noninteractive.corner_radius = radius;
+    widgets.inactive.bg_fill = p.well;
+    widgets.inactive.weak_bg_fill = p.well;
+    widgets.inactive.bg_stroke = Stroke::NONE;
+    widgets.inactive.fg_stroke = Stroke::new(1.0, p.soft);
+    widgets.inactive.corner_radius = radius;
+    widgets.hovered.bg_fill = p.well;
+    widgets.hovered.weak_bg_fill = p.well;
+    widgets.hovered.bg_stroke = Stroke::new(1.0, ORANGE.gamma_multiply(0.7));
+    widgets.hovered.fg_stroke = Stroke::new(1.0, p.text);
+    widgets.hovered.corner_radius = radius;
+    widgets.active.bg_fill = p.well;
+    widgets.active.weak_bg_fill = p.well;
+    widgets.active.bg_stroke = Stroke::new(1.0, ORANGE);
+    widgets.active.fg_stroke = Stroke::new(1.0, p.text);
+    widgets.active.corner_radius = radius;
+    widgets.open.bg_fill = p.well;
+    widgets.open.weak_bg_fill = p.well;
+    widgets.open.corner_radius = radius;
+
+    let theme = if light {
+        egui::Theme::Light
+    } else {
+        egui::Theme::Dark
+    };
+    ctx.set_theme(theme);
+    ctx.set_visuals_of(theme, visuals);
 }
 
 /// Nom français d'un geste connu ; l'identifiant brut sinon.

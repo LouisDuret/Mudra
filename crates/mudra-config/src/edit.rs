@@ -1,12 +1,12 @@
 //! Modification ciblée du fichier TOML, pour l'interface : bindings,
-//! activation, contrôles continus, caméra. Le reste du fichier (commentaires,
-//! ordre, mise en forme) est conservé tel quel.
+//! activation, contrôles continus, caméra, thème. Le reste du fichier
+//! (commentaires, ordre, mise en forme) est conservé tel quel.
 
 use std::path::Path;
 
 use toml_edit::{DocumentMut, Item, Table, Value};
 
-use crate::schema::{ActivationMode, Binding, DeviceSelector};
+use crate::schema::{ActivationMode, Binding, DeviceSelector, Theme};
 
 /// Une modification de la liste `[[bindings]]`. Les indices sont ceux de
 /// `Config::bindings`.
@@ -42,6 +42,8 @@ pub enum ConfigEdit {
     Continuous(usize, ContinuousEdit),
     /// Caméra à utiliser (`camera.device`).
     Camera(DeviceSelector),
+    /// Thème de l'interface (`general.theme`).
+    Theme(Theme),
 }
 
 /// Remplace une valeur en gardant le commentaire qui la suit sur sa ligne.
@@ -71,6 +73,22 @@ fn apply_camera_edit(doc: &mut DocumentMut, device: &DeviceSelector) -> Result<(
         DeviceSelector::Index(i) => set(table, "device", i64::from(*i)),
         DeviceSelector::Name(name) => set(table, "device", name.as_str()),
     }
+    Ok(())
+}
+
+fn apply_theme_edit(doc: &mut DocumentMut, theme: Theme) -> Result<(), String> {
+    if doc.get("general").is_none() {
+        doc.insert("general", Item::Table(Table::new()));
+    }
+    let table = doc
+        .get_mut("general")
+        .and_then(Item::as_table_mut)
+        .ok_or("les réglages généraux doivent être écrits sous la forme [general]")?;
+    let theme = match theme {
+        Theme::Dark => "dark",
+        Theme::Light => "light",
+    };
+    set(table, "theme", theme);
     Ok(())
 }
 
@@ -133,6 +151,11 @@ pub fn apply_edit(text: &str, edit: &ConfigEdit) -> Result<String, String> {
         ConfigEdit::Camera(device) => {
             let mut doc: DocumentMut = text.parse().map_err(|e| format!("{e}"))?;
             apply_camera_edit(&mut doc, device)?;
+            Ok(doc.to_string())
+        }
+        ConfigEdit::Theme(theme) => {
+            let mut doc: DocumentMut = text.parse().map_err(|e| format!("{e}"))?;
+            apply_theme_edit(&mut doc, *theme)?;
             Ok(doc.to_string())
         }
     }
@@ -302,6 +325,29 @@ mod tests {
         // Un fichier sans table [camera] en reçoit une.
         let text = apply_edit("", &ConfigEdit::Camera(DeviceSelector::Index(2))).unwrap();
         assert_eq!(config(&text).camera.device, DeviceSelector::Index(2));
+    }
+
+    #[test]
+    fn theme_edit_switches_the_theme_and_nothing_else() {
+        let before = config(DEFAULT_CONFIG_TOML);
+        assert_eq!(before.general.theme, Theme::Dark);
+        let mut text = DEFAULT_CONFIG_TOML.to_string();
+        for theme in [Theme::Light, Theme::Dark] {
+            text = apply_edit(&text, &ConfigEdit::Theme(theme)).unwrap();
+            let after = config(&text);
+            assert_eq!(after.general.theme, theme);
+            assert_eq!(after.general.overlay, before.general.overlay);
+            assert_eq!(after.bindings, before.bindings);
+            assert_eq!(comments(&text), comments(DEFAULT_CONFIG_TOML));
+        }
+        assert_eq!(text, DEFAULT_CONFIG_TOML);
+        // Un fichier d'avant ce réglage, ou sans table [general], le reçoit.
+        for old in ["", "[general]\nsounds = false\n"] {
+            assert_eq!(config(old).general.theme, Theme::Dark);
+            let text = apply_edit(old, &ConfigEdit::Theme(Theme::Light)).unwrap();
+            assert_eq!(config(&text).general.theme, Theme::Light);
+            assert_eq!(config(&text).general.sounds, config(old).general.sounds);
+        }
     }
 
     #[test]

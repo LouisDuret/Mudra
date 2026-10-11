@@ -273,7 +273,7 @@ fn knn_distance<'a, F: Shape + 'a>(f: &F, examples: impl Iterator<Item = &'a F>)
 /// Confiance d'une pose à la distance `distance` : 0,9 au seuil, puis chute
 /// rapide. La zone entre les seuils d'entrée et de sortie du moteur donne
 /// l'hystérésis.
-fn confidence(distance: f32, threshold: f32) -> f32 {
+pub(crate) fn confidence(distance: f32, threshold: f32) -> f32 {
     let r = distance / threshold.max(1e-6);
     1.0 / (1.0 + 0.11 * r.powi(6))
 }
@@ -566,7 +566,7 @@ impl<F: Shape> Matcher<F> {
 
 /// La meilleure pose de `scores` prend sa confiance sur tout `out` ; les poses
 /// du groupe se partagent cette même masse, chacune sur son label de `targets`.
-fn overlay(out: &mut [f32], scores: &[f32], targets: impl Iterator<Item = usize>) {
+pub(crate) fn overlay(out: &mut [f32], scores: &[f32], targets: impl Iterator<Item = usize>) {
     let best = scores.iter().copied().fold(0.0, f32::max);
     let sharp_sum: f32 = scores.iter().map(|s| s.powi(4)).sum();
     if sharp_sum <= 0.0 {

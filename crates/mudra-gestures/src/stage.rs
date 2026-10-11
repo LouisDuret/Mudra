@@ -255,7 +255,10 @@ impl GestureStage {
             );
             slot.dynamic_fresh = false;
             if slot.frames.is_multiple_of(DYNAMIC_EVERY)
-                && slot.window.resample(&mut self.resampled)
+                && slot.window.resample(
+                    self.dynamic_classifier.min_window_len(),
+                    &mut self.resampled,
+                )
             {
                 let n = self.dynamic_classifier.labels().len();
                 view.dynamic_probs.resize(n, 0.0);

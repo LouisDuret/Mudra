@@ -231,6 +231,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             let kind = if *dynamic {
                 RecordKind::Dynamic {
                     reps: (*reps).clamp(1, 500),
+                    seconds: pipeline::CLIP_SECONDS,
                 }
             } else {
                 RecordKind::Static {
