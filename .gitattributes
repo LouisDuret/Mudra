@@ -1,1 +1,3 @@
 models/LICENSE -text
+*.ttf binary
+crates/mudra-app/assets/fonts/*-OFL.txt -text

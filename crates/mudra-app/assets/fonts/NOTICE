@@ -1,0 +1,22 @@
+Mudra — polices tierces
+=======================
+
+Les polices de ce dossier sont compilées dans mudra.exe. Elles sont
+distribuées sous la SIL Open Font License, version 1.1, et ne sont pas
+modifiées (seul le fichier est renommé).
+
+  - Manrope.ttf        Manrope, police variable (graisse)
+      Copyright 2018 The Manrope Project Authors
+      https://github.com/googlefonts/manrope
+      licence : Manrope-OFL.txt
+
+  - JetBrainsMono.ttf  JetBrains Mono, police variable (graisse)
+      Copyright 2020 The JetBrains Mono Project Authors
+      https://github.com/JetBrains/JetBrainsMono
+      licence : JetBrainsMono-OFL.txt
+
+Fichiers pris dans https://github.com/google/fonts (ofl/manrope et
+ofl/jetbrainsmono). Empreintes SHA-256 :
+
+  3ae11c49db0455a3cc33e37d380f20fdb8c7f8b41dc07625c177e3d87a9d6ae6  Manrope.ttf
+  48715a42ec242c21e9f02692891e147d022299a52e48d5e413e1a942193ffeda  JetBrainsMono.ttf

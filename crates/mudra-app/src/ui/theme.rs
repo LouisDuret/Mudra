@@ -180,55 +180,71 @@ pub fn mono(size: f32) -> FontId {
     FontId::new(size, FontFamily::Monospace)
 }
 
-/// Polices du système, en trois graisses, devant celles d'egui qui gardent
-/// les symboles. Une police absente laisse sa graisse retomber sur la suivante.
+/// Polices des maquettes, compilées dans le binaire (voir `assets/fonts/NOTICE`).
+static MANROPE: &[u8] = include_bytes!("../../assets/fonts/Manrope.ttf");
+static JETBRAINS_MONO: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono.ttf");
+
+/// Graisses de Manrope pour le texte courant, les libellés et les titres :
+/// les maquettes vont de 400 à 800.
+const REGULAR_WEIGHT: f32 = 450.0;
+const SEMIBOLD_WEIGHT: f32 = 650.0;
+const BOLD_WEIGHT: f32 = 800.0;
+
+/// Manrope en trois graisses et JetBrains Mono, devant Segoe UI (pour les
+/// écritures que Manrope n'a pas) puis les polices d'egui, qui gardent les
+/// symboles.
 fn fonts() -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
-    let dir = std::env::var_os("WINDIR")
+    let mut embed = |name: &str, bytes: &'static [u8], weight: f32| {
+        let tweak = egui::FontTweak {
+            coords: egui::epaint::text::VariationCoords::new([(b"wght", weight)]),
+            ..Default::default()
+        };
+        let data = egui::FontData::from_static(bytes).tweak(tweak);
+        fonts.font_data.insert(name.to_owned(), Arc::new(data));
+    };
+    embed("regular", MANROPE, REGULAR_WEIGHT);
+    embed(SEMIBOLD, MANROPE, SEMIBOLD_WEIGHT);
+    embed(BOLD, MANROPE, BOLD_WEIGHT);
+    embed("mono", JETBRAINS_MONO, REGULAR_WEIGHT);
+
+    let system = std::env::var_os("WINDIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
-        .join("Fonts");
-    let mut load = |name: &str, files: &[&str]| {
-        let bytes = files.iter().find_map(|f| std::fs::read(dir.join(f)).ok())?;
-        fonts
-            .font_data
-            .insert(name.to_owned(), Arc::new(egui::FontData::from_owned(bytes)));
-        Some(name.to_owned())
-    };
-    let regular = load("regular", &["segoeui.ttf"]);
-    let semibold = load(SEMIBOLD, &["seguisb.ttf", "segoeuib.ttf"]);
-    let bold = load(BOLD, &["segoeuib.ttf", "seguisb.ttf"]);
-    let mono = load("mono", &["CascadiaMono.ttf", "consola.ttf"]);
-
+        .join("Fonts")
+        .join("segoeui.ttf");
+    let fallback = std::fs::read(system).ok().map(|bytes| {
+        fonts.font_data.insert(
+            "systeme".to_owned(),
+            Arc::new(egui::FontData::from_owned(bytes)),
+        );
+        "systeme".to_owned()
+    });
     let base = fonts
         .families
         .get(&FontFamily::Proportional)
         .cloned()
         .unwrap_or_default();
-    let stack = |first: &[&Option<String>]| -> Vec<String> {
-        first
-            .iter()
-            .filter_map(|name| (*name).clone())
+    let stack = |first: &str| -> Vec<String> {
+        std::iter::once(first.to_owned())
+            .chain(fallback.clone())
             .chain(base.iter().cloned())
             .collect()
     };
     fonts
         .families
-        .insert(FontFamily::Proportional, stack(&[&regular]));
-    fonts.families.insert(
-        FontFamily::Name(SEMIBOLD.into()),
-        stack(&[&semibold, &regular]),
-    );
+        .insert(FontFamily::Proportional, stack("regular"));
     fonts
         .families
-        .insert(FontFamily::Name(BOLD.into()), stack(&[&bold, &regular]));
-    if let Some(mono) = mono {
-        fonts
-            .families
-            .entry(FontFamily::Monospace)
-            .or_default()
-            .insert(0, mono);
-    }
+        .insert(FontFamily::Name(SEMIBOLD.into()), stack(SEMIBOLD));
+    fonts
+        .families
+        .insert(FontFamily::Name(BOLD.into()), stack(BOLD));
+    fonts
+        .families
+        .entry(FontFamily::Monospace)
+        .or_default()
+        .insert(0, "mono".to_owned());
     fonts
 }
 

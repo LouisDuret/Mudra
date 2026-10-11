@@ -377,6 +377,9 @@ Fait et vérifié sur la machine cible (i7-10700K, RTX 3070, StreamCam) :
 
 Code de Mudra : MIT ou Apache-2.0, au choix. Les modèles de vision viennent
 d'[opencv_zoo](https://github.com/opencv/opencv_zoo) (conversions ONNX de
-MediaPipe Hands, Apache 2.0) : voir [models/NOTICE](models/NOTICE). Les photos
+MediaPipe Hands, Apache 2.0) : voir [models/NOTICE](models/NOTICE). Les
+polices de l'interface, Manrope et JetBrains Mono, sont sous licence SIL Open
+Font License 1.1 : voir
+[crates/mudra-app/assets/fonts/NOTICE](crates/mudra-app/assets/fonts/NOTICE). Les photos
 de `tests/fixtures/hands` viennent des exemples publics de MediaPipe et ne
 servent qu'aux tests.
